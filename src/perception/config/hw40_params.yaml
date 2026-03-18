@@ -1,0 +1,31 @@
+camera:
+  frame_id: camera_link
+  width: 640
+  height: 480
+  distortion_model: plumb_bob
+
+# 코드에서 cfg["intrinsics"]로 바로 접근하므로 camera 바깥(같은 레벨)에 둡니다.
+intrinsics:
+  fx: 499.74665
+  fy: 712.17893
+  cx: 325.37045
+  cy: 246.26333
+  k1: 0.112338
+  k2: -0.183764
+  p1: 0.000000
+  p2: 0.000000
+  k3: 0.000000
+
+extrinsics:
+  pitch_deg: 23.6602
+  yaw_deg: -2.0857
+  roll_deg: -0.4722
+  height_m: 0.2735
+
+bev:
+  x_min: 0.10
+  x_max: 1.50
+  y_min: -0.70
+  y_max: 0.70
+  output_width: 500
+  output_height: 700
