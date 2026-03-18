@@ -24,8 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-		'serial_node2 = serial_bridge.serial_node2:main',
-		'dummy_track_sim = serial_bridge.dummy_track_sim:main'		
+		'serial_node2 = serial_bridge.serial_node2:main',	
         ],
     },
 )

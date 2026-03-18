@@ -2,157 +2,130 @@
 #include <nav_msgs/msg/path.hpp>
 #include <std_msgs/msg/float32.hpp>
 #include <ackermann_msgs/msg/ackermann_drive_stamped.hpp>
-#include <geometry_msgs/msg/transform_stamped.hpp>
-#include <tf2_ros/transform_broadcaster.h>
-#include <vector>
 #include <cmath>
 #include <algorithm>
+#include <chrono> // 타이머 사용을 위한 헤더
 
 using namespace std;
 
 class ControlNode : public rclcpp::Node {
 public:
     ControlNode() : Node("control_node") {
-        // [설정] 차량 물리 파라미터 및 제어 가중치
-        wheelbase_ = 0.26; max_steer_ = 0.523;
-        w_cte_ = 100.0; w_epsi_ = 50.0; w_d_steer_ = 1500.0; w_gforce_ = 300.0;
-        latency_ = 0.05; max_lat_g_ = 3.0; lpf_alpha_ = 0.2;
+        // [설정] 차량 물리 파라미터
+        wheelbase_ = 0.257;      // TT-02D 정확한 축간 거리 (m)
+        max_steer_ = 0.523598;   // ⭐ 최대 조향각 (30도를 라디안으로 정확히 변환)
         
-        current_speed_ = 0.0; filtered_speed_ = 0.0; last_steer_ = 0.0;
-        x_ = 0.0; y_ = 0.0; yaw_ = 0.0; N_ = 10;
+        // ⭐ 가변 전방 주시 (Adaptive Lookahead) 파라미터
+        lookahead_min_ = 0.3;    
+        lookahead_max_ = 1.0;    
+        lookahead_gain_ = 0.8;   
+        
+        min_speed_ = 0.15;       
+        max_speed_ = 0.4;        
+        current_speed_ = 0.0;    
 
-        // ⭐ TF 브로드캐스터 초기화
-        tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
-
-        // [구독] 경로 및 현재 속도 (SerialBridge로부터 수신)
+        // 구독 및 발행
         path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
             "/planning/local_path", 10, bind(&ControlNode::path_callback, this, placeholders::_1));
-        
-        ego_speed_sub_ = this->create_subscription<std_msgs::msg::Float32>(
-            "/ego_speed", 10, [this](const std_msgs::msg::Float32::SharedPtr msg) {
-                // Low Pass Filter로 엔코더 노이즈 제거
-                this->filtered_speed_ = lpf_alpha_ * msg->data + (1.0 - lpf_alpha_) * this->filtered_speed_;
-                this->current_speed_ = this->filtered_speed_;
-                this->update_odometry(this->current_speed_);
-            });
-
+            
+        speed_sub_ = this->create_subscription<std_msgs::msg::Float32>(
+            "/ego_speed", 10, bind(&ControlNode::speed_callback, this, placeholders::_1));
+            
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>("/auto_drive", 10);
-        RCLCPP_INFO(this->get_logger(), "🔥 [Control] MPC 실행 중 (실전 주행 모드 + TF 방송)");
+
+        // ⭐ 핵심: 경로 수신과 상관없이 50Hz(20ms) 주기로 조향을 즉각 계산하는 고속 타이머!
+        timer_ = this->create_wall_timer(
+            chrono::milliseconds(20), 
+            bind(&ControlNode::control_loop, this)
+        );
+
+        RCLCPP_INFO(this->get_logger(), "🚀 [Control] 50Hz 고속 타이머 Adaptive Pure Pursuit 실행 중!");
     }
 
 private:
-    // 데드 레코닝: 실제 속도와 조향각으로 현재 위치(x, y, yaw) 추정
-    void update_odometry(double v) {
-        rclcpp::Time now = this->get_clock()->now();
-        if (last_odom_time_.nanoseconds() != 0) {
-            double dt = (now - last_odom_time_).seconds();
-            
-            // ⭐ [복구 완료] 실제 주행용 운동학(Kinematic) 모델
-            x_ += v * cos(yaw_) * dt;
-            y_ += v * sin(yaw_) * dt;
-            yaw_ += (v / wheelbase_) * tan(last_steer_) * dt;
-        }
-        last_odom_time_ = now;
-        
-        // ⭐ 위치 업데이트가 끝날 때마다 RViz로 위치 전송
-        publish_tf(); 
+    void speed_callback(const std_msgs::msg::Float32::SharedPtr msg) {
+        current_speed_ = msg->data;
     }
 
     void path_callback(const nav_msgs::msg::Path::SharedPtr msg) {
-        if (msg->poses.empty()) { publish_drive(0.0, 0.0); return; }
-
-        double target_v = msg->poses[0].pose.position.z;
-        if (target_v <= 0.01) target_v = 3.0;
-
-        // 지연 보상: latency초 후의 위치 예측
-        double cv = max(current_speed_, 0.5);
-        double cx = x_ + cv * cos(yaw_) * latency_;
-        double cy = y_ + cv * sin(yaw_) * latency_;
-        double cyaw = yaw_ + (cv / wheelbase_) * tan(last_steer_) * latency_;
-
-        double best_steer = find_optimal_steering(*msg, cx, cy, cyaw, cv);
-        last_steer_ = best_steer;
-        publish_drive(target_v, best_steer);
+        // ⭐ 경로가 들어오면 연산하지 않고 최신 데이터로 저장만 해둡니다. (병목 제거)
+        latest_path_ = *msg;
     }
 
-    // Coarse-to-Fine 최적화 및 비용 함수 로직
-    double find_optimal_steering(const nav_msgs::msg::Path& path, double cx, double cy, double cyaw, double cv) {
-        double best_s = 0.0; double min_c = 1e18;
-        double steps[] = { 0.1, 0.01 };
-        double center = 0.0;
-        for (double step : steps) {
-            double low = max(-max_steer_, center - 0.15);
-            double high = min(max_steer_, center + 0.15);
-            for (double s = low; s <= high; s += step) {
-                double c = evaluate_cost(path, s, cx, cy, cyaw, cv);
-                if (c < min_c) { min_c = c; best_s = s; }
-            }
-            center = best_s;
+    // ⭐ 타이머에 의해 0.02초마다 무조건 실행되는 고속 반응 제어 루프
+    void control_loop() {
+        if (latest_path_.poses.empty()) { 
+            publish_drive(0.0, 0.0); 
+            return; 
         }
-        return best_s;
-    }
 
-    double evaluate_cost(const nav_msgs::msg::Path& path, double steer, double cx, double cy, double cyaw, double cv) {
-        double cost = 0.0;
-        double px = cx, py = cy, pyaw = cyaw;
-        int search_idx = 0;
-        double adaptive_dt = 0.05 * (1.0 + 0.2 * cv); 
+        double dynamic_lookahead = lookahead_min_ + (lookahead_gain_ * abs(current_speed_));
+        dynamic_lookahead = max(lookahead_min_, min(lookahead_max_, dynamic_lookahead));
 
-        for (int i = 1; i <= N_; ++i) {
-            double step_v = path.poses[search_idx].pose.position.z;
-            if (step_v <= 0.1) step_v = cv;
-            px += step_v * cos(pyaw) * adaptive_dt;
-            py += step_v * sin(pyaw) * adaptive_dt;
-            pyaw += (step_v / wheelbase_) * tan(steer) * adaptive_dt;
-
-            double min_d = 1e9; int best_j = search_idx;
-            for (int j = search_idx; j < min((int)path.poses.size(), search_idx + 15); ++j) {
-                double d = pow(path.poses[j].pose.position.x - px, 2) + pow(path.poses[j].pose.position.y - py, 2);
-                if (d < min_d) { min_d = d; best_j = j; }
+        int target_idx = 0;
+        
+        for (size_t i = 0; i < latest_path_.poses.size(); ++i) {
+            double tx = latest_path_.poses[i].pose.position.x;
+            double ty = latest_path_.poses[i].pose.position.y;
+            double dist = hypot(tx, ty); 
+            
+            if (dist >= dynamic_lookahead) {
+                target_idx = i;
+                break;
             }
-            search_idx = best_j;
-
-            // 횡가속도 제한 패널티
-            double radius = wheelbase_ / (tan(abs(steer)) + 1e-6);
-            double lat_g = (step_v * step_v) / radius;
-            if (lat_g > max_lat_g_) cost += w_gforce_ * pow(lat_g - max_lat_g_, 2);
-
-            cost += w_cte_ * min_d; // 경로 이탈 오차 합산
         }
-        cost += w_d_steer_ * pow(steer - last_steer_, 2);
-        return cost;
+        
+        if (target_idx == 0 && latest_path_.poses.size() > 1) {
+            target_idx = latest_path_.poses.size() - 1;
+        }
+
+        double tx = latest_path_.poses[target_idx].pose.position.x;
+        double ty = latest_path_.poses[target_idx].pose.position.y;
+        double target_v = latest_path_.poses[target_idx].pose.position.z;
+
+        double alpha = atan2(ty, tx);
+        double actual_Ld = hypot(tx, ty); 
+        double steer = 0.0;
+        
+        if (actual_Ld > 0.01) {
+            steer = atan2(2.0 * wheelbase_ * sin(alpha), actual_Ld);
+        }
+        steer = max(-max_steer_, min(max_steer_, steer)); 
+
+        if (abs(target_v) > 0.01) {
+            double cornering_factor = 1.0 - (abs(steer) / max_steer_) * 0.4;
+            target_v = target_v * cornering_factor;
+        }
+
+        if (abs(target_v) > 0.01 && abs(target_v) < min_speed_) {
+            target_v = (target_v > 0) ? min_speed_ : -min_speed_;
+        } else if (abs(target_v) <= 0.01) {
+            target_v = 0.0;
+        }
+        target_v = max(-max_speed_, min(max_speed_, target_v));
+
+        publish_drive(target_v, steer);
     }
 
     void publish_drive(double v, double delta) {
         auto msg = ackermann_msgs::msg::AckermannDriveStamped();
         msg.header.stamp = this->get_clock()->now();
         msg.drive.speed = (float)v;
-        msg.drive.steering_angle = (float)max(-max_steer_, min(max_steer_, delta));
+        msg.drive.steering_angle = (float)delta;
         drive_pub_->publish(msg);
     }
 
-    // ⭐ RViz 시각화를 위한 TF 발행 함수
-    void publish_tf() {
-        geometry_msgs::msg::TransformStamped t;
-        t.header.stamp = this->get_clock()->now();
-        t.header.frame_id = "map";
-        t.child_frame_id = "base_link";
-        t.transform.translation.x = x_;
-        t.transform.translation.y = y_;
-        t.transform.translation.z = 0.0;
-        // Yaw(라디안) 값을 쿼터니언으로 변환
-        t.transform.rotation.z = sin(yaw_ / 2.0);
-        t.transform.rotation.w = cos(yaw_ / 2.0);
-        tf_broadcaster_->sendTransform(t);
-    }
+    double wheelbase_, max_steer_;
+    double lookahead_min_, lookahead_max_, lookahead_gain_; 
+    double min_speed_, max_speed_; 
+    double current_speed_;
+    
+    nav_msgs::msg::Path latest_path_; // ⭐ 최신 경로 저장 변수 추가
 
-    double wheelbase_, max_steer_, w_cte_, w_epsi_, w_d_steer_, w_gforce_, current_speed_, filtered_speed_, last_steer_, latency_, max_lat_g_, lpf_alpha_, x_, y_, yaw_;
-    int N_;
-    rclcpp::Time last_odom_time_;
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
-    rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr ego_speed_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr speed_sub_;
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
-    std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+    rclcpp::TimerBase::SharedPtr timer_; // ⭐ 50Hz 루프용 타이머 추가
 };
 
 int main(int argc, char** argv) {

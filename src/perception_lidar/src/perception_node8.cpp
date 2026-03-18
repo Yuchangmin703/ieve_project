@@ -40,8 +40,8 @@ private:
     // 1. 관심 영역 (ROI) 설정 (단위: m, 기준: 앞범퍼 base_link)
     const float ROI_X_MIN = 0.0f;   // 앞범퍼부터
     const float ROI_X_MAX = 3.0f;   // 전방 3m까지
-    const float ROI_Y_MIN = -0.1f;  // 우측 10cm부터
-    const float ROI_Y_MAX = 0.1f;   // 좌측 10cm까지
+    const float ROI_Y_MIN = -1.0f;  // 우측 10cm부터
+    const float ROI_Y_MAX = 1.0f;   // 좌측 10cm까지
 
     // 2. 필터 및 데드존 설정 (현재 테스트를 위해 0.0)
     const size_t MA_WINDOW = 15;       // 이동 평균 필터 프레임 수 (15프레임 = 약 1.5초)

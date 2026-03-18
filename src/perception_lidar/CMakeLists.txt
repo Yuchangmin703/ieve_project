@@ -13,19 +13,6 @@ find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 
-# --- perception_node6 ---
-add_executable(perception_node6 src/perception_node6.cpp)
-ament_target_dependencies(perception_node6
-  rclcpp
-  sensor_msgs
-  geometry_msgs
-  visualization_msgs
-)
-install(TARGETS
-  perception_node6
-  DESTINATION lib/${PROJECT_NAME}
-)
-
 # --- perception_node7 ---
 add_executable(perception_node7 src/perception_node7.cpp)
 ament_target_dependencies(perception_node7
