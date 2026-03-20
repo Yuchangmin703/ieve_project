@@ -8,7 +8,7 @@
 #include <cmath>
 #include <limits>
 #include <iomanip> 
-#include <algorithm> // ⭐ std::sort 사용을 위해 추가!
+#include <algorithm> 
 
 #include "perception/msg/lanes.hpp" 
 
@@ -33,6 +33,29 @@ struct TrackedObstacle {
 class RacePlannerNode : public rclcpp::Node {
 public:
     RacePlannerNode() : Node("race_planner_node") {
+        
+        // =====================================================================
+        // 🛠️ [튜닝 파라미터 컨트롤 패널] 여기서 주행 성향을 모두 조절하세요!
+        // =====================================================================
+        
+        // 1. 절대 속도 제한 (m/s)
+        v_max_ = 1.0f; // 직선이나 뻥 뚫린 길에서 달릴 '최고 속도'
+        v_min_ = 0.5f; // 급코너나 장애물 앞에서 기어갈 '최저 속도'
+
+        // 2. 장애물 감속 거리 (m)
+        d_max_ = 1.5f; // 이 거리 안으로 장애물이 들어오면 슬슬 브레이크 밟기 시작
+        d_min_ = 0.5f; // 이 거리보다 가까우면 무조건 최저 속도(v_min)로 감속
+
+        // 3. 코너링 감속 각도 (도, Degree) -> 직관적으로 숫자만 넣으세요!
+        a_min_deg_ = 5.0f;  // 전방 경로가 이 각도(5도) 이하면 직선으로 간주 -> v_max
+        a_max_deg_ = 25.0f; // 전방 경로가 이 각도(25도) 이상 꺾이면 급코너로 간주 -> v_min
+
+        // 4. 경로 부드럽게 만들기 (스킵 파라미터)
+        start_skip_ = 70;        // 내 차 바로 앞쪽 경로 버리기 (개수)
+        jump_smooth_range_ = 30; // 차선 변경(점프) 시 앞뒤로 스킵할 범위 (개수)
+        
+        // =====================================================================
+
         lanes_sub_ = this->create_subscription<perception::msg::Lanes>(
             "/perception/lane/lanes", 10, 
             std::bind(&RacePlannerNode::lanes_callback, this, std::placeholders::_1));
@@ -47,7 +70,7 @@ public:
         path_vis_pub_ = this->create_publisher<visualization_msgs::msg::Marker>("/planning/path_vis", 10); 
         speed_text_pub_ = this->create_publisher<visualization_msgs::msg::Marker>("/planning/speed_text", 10); 
 
-        target_speed_ = 1.0;
+        target_speed_ = 1.0; // 초기값 (데이터 들어오면 즉시 덮어씌워짐)
         
         max_search_radius_ = 0.1;      
         jump_search_radius_ = 0.6;     
@@ -56,7 +79,7 @@ public:
         
         lidar_to_base_offset_x_ = 0.0;  
 
-        RCLCPP_INFO(this->get_logger(), "🏁 [Planner] O(N) 최적화 & 고정 스킵(70) & 동적 속도 제어 실행 중!");
+        RCLCPP_INFO(this->get_logger(), "🏁 [Planner] 튜닝 패널 적용 완료! 파라미터를 쉽게 변경할 수 있습니다.");
     }
 
 private:
@@ -98,9 +121,7 @@ private:
 
         if (points.empty()) return;
 
-        // ========================================================
-        // ⭐ 최적화 1단계: 점들을 X축 기준으로 정렬 (O(N log N))
-        // ========================================================
+        // 최적화 1단계: 점들을 X축 기준으로 정렬
         std::sort(points.begin(), points.end(), [](const Point2D& a, const Point2D& b) {
             return a.x < b.x;
         });
@@ -123,7 +144,7 @@ private:
         final_path.push_back(points[start_idx]);
         points[start_idx].visited = true;
         
-        int current_idx = start_idx; // ⭐ 현재 인덱스 기억
+        int current_idx = start_idx; 
         Point2D current_point = points[current_idx];
 
         float min_dist_to_P = 999.0f; 
@@ -144,9 +165,8 @@ private:
 
                     current_search_radius = jump_search_radius_; 
                     
-                    // 버블 B 내부 점 지우기도 O(N) 최적화 반영 (앞으로만 탐색 & 조기 종료)
                     for (size_t p_idx = current_idx + 1; p_idx < points.size(); ++p_idx) {
-                        if (points[p_idx].x - current_point.x > bubble_b_radius_ + 0.3f) break; // 멀어지면 즉시 중단!
+                        if (points[p_idx].x - current_point.x > bubble_b_radius_ + 0.3f) break; 
                         
                         if (!points[p_idx].visited) {
                             if (hypot(points[p_idx].x - obs.x, points[p_idx].y - obs.y) < bubble_b_radius_ || 
@@ -159,14 +179,10 @@ private:
                 }
             }
 
-            // ========================================================
-            // ⭐ 최적화 2단계: 인덱스 전진 탐색 & 조기 종료 (O(N) 달성)
-            // ========================================================
-            for (size_t i = current_idx + 1; i < points.size(); ++i) { // 0부터가 아니라 current_idx 다음부터!
+            // 최적화 2단계: 인덱스 전진 탐색 & 조기 종료
+            for (size_t i = current_idx + 1; i < points.size(); ++i) { 
                 if (points[i].visited) continue;
 
-                // X축으로 이미 탐색 반경(radius)을 넘어섰다면?
-                // 리스트가 X축 정렬되어 있으므로 이후 점들은 볼 필요도 없음 -> 즉시 break!
                 if (points[i].x - current_point.x > current_search_radius) {
                     break; 
                 }
@@ -182,23 +198,20 @@ private:
 
             final_path.push_back(points[next_idx]);
             points[next_idx].visited = true;
-            current_idx = next_idx; // ⭐ 다음 탐색은 여기서부터 시작
+            current_idx = next_idx; 
             current_point = points[next_idx];
         }
 
-        // 유저 아이디어: 70개 스킵 + 차선 변경(점프) 시 앞뒤 30개 추가 스킵! (고정값 유지)
+        // 경로 스킵 로직 (위의 멤버 변수 파라미터 적용)
         vector<Point2D> smoothed_path;
-        smoothed_path.push_back({0.0f, 0.0f, true}); // 내 차 앞범퍼 
-
-        int start_skip = 70;        
-        int jump_smooth_range = 30; 
+        smoothed_path.push_back({0.0f, 0.0f, true}); 
 
         for (int i = 0; i < (int)final_path.size(); ++i) {
-            if (i < start_skip) continue;
+            if (i < start_skip_) continue;
 
             bool is_near_jump = false;
-            int check_start = std::max(0, i - jump_smooth_range);
-            int check_end = std::min((int)final_path.size() - 2, i + jump_smooth_range);
+            int check_start = std::max(0, i - jump_smooth_range_);
+            int check_end = std::min((int)final_path.size() - 2, i + jump_smooth_range_);
             
             for (int k = check_start; k <= check_end; ++k) {
                 float dist = hypot(final_path[k].x - final_path[k+1].x, final_path[k].y - final_path[k+1].y);
@@ -220,40 +233,36 @@ private:
         final_path = smoothed_path;
 
         // ========================================================
-        // 동적 최대 속도 생성 로직 (V_p & V_q 융합)
+        // 동적 최대 속도 생성 로직 (위의 멤버 변수 파라미터 적용)
         // ========================================================
-        float v_max = 1.5f; 
-        float v_min = 0.5f; 
-
-        float V_p = v_max;
-        float d_max = 1.5f; 
-        float d_min = 0.5f; 
         
-        if (min_dist_to_P <= d_min) {
-            V_p = v_min;
-        } else if (min_dist_to_P < d_max) {
-            V_p = v_min + (v_max - v_min) * ((min_dist_to_P - d_min) / (d_max - d_min));
+        float V_p = v_max_;
+        if (min_dist_to_P <= d_min_) {
+            V_p = v_min_;
+        } else if (min_dist_to_P < d_max_) {
+            V_p = v_min_ + (v_max_ - v_min_) * ((min_dist_to_P - d_min_) / (d_max_ - d_min_));
         }
 
-        float V_q = v_max;
+        float V_q = v_max_;
         if (final_path.size() > 1) {
             Point2D Q = final_path[1]; 
             float angle_Q = std::abs(std::atan2(Q.y, Q.x)); 
             
-            float a_min = 5.0f * M_PI / 180.0f;  
-            float a_max = 25.0f * M_PI / 180.0f; 
+            // 입력한 Degree를 코드 계산용 Radian으로 자동 변환
+            float a_min_rad = a_min_deg_ * M_PI / 180.0f;  
+            float a_max_rad = a_max_deg_ * M_PI / 180.0f; 
             
-            if (angle_Q >= a_max) {
-                V_q = v_min;
-            } else if (angle_Q > a_min) {
-                V_q = v_max - (v_max - v_min) * ((angle_Q - a_min) / (a_max - a_min));
+            if (angle_Q >= a_max_rad) {
+                V_q = v_min_;
+            } else if (angle_Q > a_min_rad) {
+                V_q = v_max_ - (v_max_ - v_min_) * ((angle_Q - a_min_rad) / (a_max_rad - a_min_rad));
             }
         }
 
         target_speed_ = std::min(V_p, V_q);
 
         // 시각화 퍼블리시
-        publish_path_visualization(final_path, v_min, v_max);
+        publish_path_visualization(final_path, v_min_, v_max_);
         publish_speed_text(target_speed_);
 
         nav_msgs::msg::Path path_msg;
@@ -360,16 +369,23 @@ private:
         car_marker_pub_->publish(marker);
     }
 
+    // ROS 관련 변수들
     rclcpp::Subscription<perception::msg::Lanes>::SharedPtr lanes_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr obs_sub_; 
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
-    
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr car_marker_pub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr path_vis_pub_; 
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr speed_text_pub_; 
     
     std::vector<TrackedObstacle> obstacles_; 
     
+    // 💡 튜닝 패널용 멤버 변수 선언
+    float v_max_, v_min_;
+    float d_max_, d_min_;
+    float a_min_deg_, a_max_deg_;
+    int start_skip_, jump_smooth_range_;
+
+    // 기존 멤버 변수
     float target_speed_;
     float max_search_radius_;
     float jump_search_radius_;
