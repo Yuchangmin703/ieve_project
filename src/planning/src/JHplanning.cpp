@@ -51,7 +51,7 @@ public:
         a_max_deg_ = 25.0f; // 전방 경로가 이 각도(25도) 이상 꺾이면 급코너로 간주 -> v_min
 
         // 4. 경로 부드럽게 만들기 (스킵 파라미터)
-        start_skip_ = 70;        // 내 차 바로 앞쪽 경로 버리기 (개수)
+        start_skip_ = 20;        // 내 차 바로 앞쪽 경로 버리기 (개수) — 70→20: 반응속도 개선
         jump_smooth_range_ = 30; // 차선 변경(점프) 시 앞뒤로 스킵할 범위 (개수)
         
         // =====================================================================
@@ -240,26 +240,39 @@ private:
         if (min_dist_to_P <= d_min_) {
             V_p = v_min_;
         } else if (min_dist_to_P < d_max_) {
-            V_p = v_min_ + (v_max_ - v_min_) * ((min_dist_to_P - d_min_) / (d_max_ - d_min_));
+            // C6: d_max_ == d_min_ 이면 0나눔 → fallback
+            float d_range = d_max_ - d_min_;
+            if (d_range > 1e-4f) {
+                V_p = v_min_ + (v_max_ - v_min_) * ((min_dist_to_P - d_min_) / d_range);
+            } else {
+                V_p = v_min_;
+            }
         }
 
         float V_q = v_max_;
         if (final_path.size() > 1) {
-            Point2D Q = final_path[1]; 
-            float angle_Q = std::abs(std::atan2(Q.y, Q.x)); 
-            
-            // 입력한 Degree를 코드 계산용 Radian으로 자동 변환
-            float a_min_rad = a_min_deg_ * M_PI / 180.0f;  
-            float a_max_rad = a_max_deg_ * M_PI / 180.0f; 
-            
+            Point2D Q = final_path[1];
+            float angle_Q = std::abs(std::atan2(Q.y, Q.x));
+
+            float a_min_rad = a_min_deg_ * M_PI / 180.0f;
+            float a_max_rad = a_max_deg_ * M_PI / 180.0f;
+
             if (angle_Q >= a_max_rad) {
                 V_q = v_min_;
             } else if (angle_Q > a_min_rad) {
-                V_q = v_max_ - (v_max_ - v_min_) * ((angle_Q - a_min_rad) / (a_max_rad - a_min_rad));
+                // C6: a_max_rad == a_min_rad 이면 0나눔 → fallback
+                float a_range = a_max_rad - a_min_rad;
+                if (a_range > 1e-6f) {
+                    V_q = v_max_ - (v_max_ - v_min_) * ((angle_Q - a_min_rad) / a_range);
+                } else {
+                    V_q = v_min_;
+                }
             }
         }
 
         target_speed_ = std::min(V_p, V_q);
+        // C7: NaN/Inf 속도가 하드웨어로 전달되지 않도록 방어
+        if (!std::isfinite(target_speed_)) target_speed_ = v_min_;
 
         // 시각화 퍼블리시
         publish_path_visualization(final_path, v_min_, v_max_);

@@ -20,6 +20,8 @@ private:
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr mode_pub_;
 
     void joyCallback(const sensor_msgs::msg::Joy::SharedPtr msg) {
+        // C2: 조이스틱 버튼/축 배열 크기 미달 시 크래시 방지
+        if (msg->buttons.size() <= 4 || msg->axes.size() <= 3) return;
         int lb = msg->buttons[4];  // F710 기준
         
         if (lb == 1 && prev_lb_ == 0) {

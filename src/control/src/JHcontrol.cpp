@@ -137,7 +137,11 @@ private:
     void publish_drive_limited(double target_v, double raw_steer) {
         rclcpp::Time now = this->get_clock()->now();
         double dt = (now - last_cmd_time_).seconds();
-        if (dt <= 0.0 || dt > 0.5) dt = 0.05; // 비정상 시간차 예외 처리
+        if (dt <= 0.0 || dt > 0.5) {
+            // M3: 타이밍 이상 발생 시 로그 출력 (시스템 과부하 또는 클럭 이상 감지용)
+            RCLCPP_WARN(this->get_logger(), "비정상 dt=%.3f 감지, 0.05로 대체", dt);
+            dt = 0.05;
+        }
         last_cmd_time_ = now;
 
         // 허용 가능한 최대 변화량 계산

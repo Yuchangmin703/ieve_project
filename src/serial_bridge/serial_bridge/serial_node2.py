@@ -33,7 +33,8 @@ class SerialBridgeNode(Node):
         if self.ser is None or not self.ser.is_open:
             self.get_logger().warn('⏳ ESP32 연결 대기 중...', throttle_duration_sec=2.0)
             try:
-                self.ser = serial.Serial('/dev/ttyCH341USB0', 115200, timeout=0)
+                # C8: write_timeout 설정 — write()가 블로킹되어 제어 체인이 멈추는 것 방지
+                self.ser = serial.Serial('/dev/ttyCH341USB0', 115200, timeout=0, write_timeout=0.1)
                 self.rx_buffer = b''
                 self.get_logger().info("✅ ESP32 연결 성공!")
             except Exception:
@@ -53,16 +54,22 @@ class SerialBridgeNode(Node):
         try:
             if self.ser is not None and self.ser.in_waiting > 0:
                 self.rx_buffer += self.ser.read(self.ser.in_waiting)
+                # M1: rx_buffer 무한 증가 방지 — newline 없는 데이터가 계속 들어올 경우 OOM 예방
+                if len(self.rx_buffer) > 1024:
+                    self.rx_buffer = b''
                 if b'\n' in self.rx_buffer:
                     lines = self.rx_buffer.split(b'\n')
-                    self.rx_buffer = lines[-1] 
+                    self.rx_buffer = lines[-1]
                     if len(lines) > 1:
                         latest_line = lines[-2].decode('ascii', errors='ignore').strip()
                         if latest_line:
                             try:
-                                speed_msg = Float32()
-                                speed_msg.data = float(latest_line)
-                                self.speed_pub.publish(speed_msg)
+                                speed_val = float(latest_line)
+                                # M2: ESP32 비정상 속도값 필터링 (±10m/s 초과 시 무시)
+                                if -10.0 < speed_val < 10.0:
+                                    speed_msg = Float32()
+                                    speed_msg.data = speed_val
+                                    self.speed_pub.publish(speed_msg)
                             except ValueError:
                                 pass
         except Exception:

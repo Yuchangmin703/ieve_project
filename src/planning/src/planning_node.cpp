@@ -677,7 +677,7 @@ private:
                 m.ns = ns;
                 m.id = i;
                
-                if (t_list.empty()) {
+                if (t_list.empty() || i >= t_list.size()) {
                     m.action = visualization_msgs::msg::Marker::DELETE;
                     candidate_markers.markers.push_back(m);
                     continue;

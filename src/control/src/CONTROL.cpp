@@ -54,7 +54,7 @@ private:
     }
 
     void path_callback(const nav_msgs::msg::Path::SharedPtr msg) {
-        if (msg->poses.empty()) return;
+        if (msg->poses.size() < 2) return;
 
         if (!is_initialized_) {
             x_ = msg->poses[0].pose.position.x;

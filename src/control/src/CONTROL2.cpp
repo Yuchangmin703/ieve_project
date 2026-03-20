@@ -19,14 +19,15 @@ public:
         // ⭐ [튜닝 포인트 1] 가변 시야 (Adaptive Lookahead)
         lookahead_min_ = 0.28;   // 축거(0.257)와 비슷하게 설정하여 코너에서 타이트하게 추종
         lookahead_max_ = 1.5;    // 직선에서는 1.5m까지 멀리 봐서 비틀거림 방지
-        lookahead_gain_ = 1.2;   // 0.15m/s일 때 시야 약 0.46m 형성
+        lookahead_gain_ = 0.7;   // 반응속도 개선: 1.2→0.7 (0.4m/s 기준 0.56m, 코너 조기 감지)
        
         min_speed_ = 0.15;      
         max_speed_ = 0.4;        // ⭐ 제어기의 절대 한계 속도
        
-        current_speed_ = 0.0;    
+        current_speed_ = 0.0;
         smoothed_steer_ = 0.0;
-        last_serial_pub_time_ = this->get_clock()->now(); // Serial 타이머 초기화
+        last_serial_pub_time_ = this->get_clock()->now();
+        last_path_time_ = this->get_clock()->now(); // 경로 타임아웃 감시용
 
         // 구독 및 발행
         path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
@@ -57,11 +58,18 @@ private:
 
     void path_callback(const nav_msgs::msg::Path::SharedPtr msg) {
         latest_path_ = *msg;
+        last_path_time_ = this->get_clock()->now();
     }
 
     void control_loop() {
+        // 경로 토픽이 0.5초 이상 오지 않으면 정지 명령 (C1: 토픽 타임아웃 watchdog)
+        double path_age = (this->get_clock()->now() - last_path_time_).seconds();
+        if (path_age > 0.5) {
+            publish_throtte_drive(0.0, 0.0);
+            return;
+        }
         if (latest_path_.poses.empty()) {
-            publish_throtte_drive(0.0, 0.0); // 멈춤 명령도 Throttling 필요
+            publish_throtte_drive(0.0, 0.0);
             return;
         }
 
@@ -92,7 +100,9 @@ private:
         // ⭐ [수정] 속도 채택 로직: Planning z값 vs 제어기 max_speed_ 중 Min 선택
         // ==========================================================
         double raw_target_v = latest_path_.poses[target_idx].pose.position.z;
-        double final_target_v = std::clamp(raw_target_v, -max_speed_, max_speed_); // 명시적으로 절대 한계 속도로 Clamping
+        // H3: NaN/Inf 속도가 플래닝에서 오면 0으로 대체
+        if (!std::isfinite(raw_target_v)) raw_target_v = 0.0;
+        double final_target_v = std::clamp(raw_target_v, -max_speed_, max_speed_);
 
         // ⭐ [시각화 실행] RViz2에 목표점 발행
         publish_target_marker(tx, ty);
@@ -112,8 +122,8 @@ private:
             steer = steer * 0.5;
         }
 
-        // 조향 스무딩 필터
-        smoothed_steer_ = (0.6 * steer) + (0.4 * smoothed_steer_);
+        // 조향 스무딩 필터 (50Hz 출력 맞춰 반응성 향상: α 0.6→0.75)
+        smoothed_steer_ = (0.75 * steer) + (0.25 * smoothed_steer_);
 
         // 3. 코너링 감속 & 최종 속도 결정
         if (abs(final_target_v) > 0.01) {
@@ -135,9 +145,9 @@ private:
     // ⭐ [추가] Serial Serial 출력 주행 속도 제한 함수 (Serial Throttling)
     void publish_throtte_drive(double v, double delta) {
         rclcpp::Time now = this->get_clock()->now();
-        // 마지막 발행 시간으로부터 50ms(20Hz)가 지나지 않았으면 토픽 발행을 무시합니다.
-        // 조향이 연속적으로 꺾여도 Serial 버퍼가 꽉 막히는 것을 방지합니다.
-        if ((now - last_serial_pub_time_).seconds() < 0.05) {
+        // 50Hz 타이머에 맞춰 20ms 간격으로 발행 (20ms → 50Hz, 반응속도 개선)
+        // serial_node2.py가 50Hz로 자체 rate-limit하므로 serial 과부하 없음
+        if ((now - last_serial_pub_time_).seconds() < 0.02) {
             return;
         }
 
@@ -184,7 +194,8 @@ private:
     double min_speed_, max_speed_;
     double current_speed_;
     double smoothed_steer_;
-    rclcpp::Time last_serial_pub_time_; // 마지막 Serial 발행 시간 저장
+    rclcpp::Time last_serial_pub_time_;
+    rclcpp::Time last_path_time_; // 마지막 경로 수신 시간 (타임아웃 감시)
 
     nav_msgs::msg::Path latest_path_;
 
