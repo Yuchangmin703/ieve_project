@@ -60,25 +60,6 @@ ros2 run serial_bridge serial_node2
 |  | VCC / GND | **VIN (5V)** / GND | Blue / Black | **신호 안정화를 위해 3.3V ➡️ 5V로 변경** |
 
 ---
-
-## ⚙️ Control Parameters & Logic
-
-### 1. PID 제어 설정
-
-실제 차량의 무게와 목표 속도 도달 응답성을 고려하여 PID 게인값이 대폭 상향 조정되었습니다.
-
-* **$K_p$ (Proportional):** `100.0` (기존 35.0에서 상승)
-* **$K_i$ (Integral):** `50.0` (기존 8.0에서 상승)
-* **$K_d$ (Derivative):** `0.8` (기존 0.5에서 상승)
-* **Anti-Windup:** `constrain(cumError, -5.0, 5.0)`
-
-### 2. 주요 설정값
-
-* **PPR (Pulse Per Revolution):** `150`
-* **Wheel Diameter:** `65.0mm` (기존 33.0mm 반지름 오류 수정)
-* **Min PWM Out:** `50` (MD20A 모터 초기 구동 데드존 보정)
----
-
 ## 💻 Source Code (ESP32 PID Control)
 
 하드웨어 연결 확인용 (아두이노) 코드입니다. 
