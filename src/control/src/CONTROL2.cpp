@@ -37,7 +37,8 @@ public:
             "/ego_speed", 10, bind(&ControlNode::speed_callback, this, placeholders::_1));
            
         // 하드웨어로 나가는 Serial 토픽 (속도 제한 필요)
-        drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>("/auto_drive", 10);
+        // 큐 크기 1: 오래된 명령이 DDS 레이어에 쌓여 burst 발행되는 것 방지
+        drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>("/auto_drive", 1);
        
         // ⭐ [시각화 추가] 목표점 토픽
         target_marker_pub_ = this->create_publisher<visualization_msgs::msg::Marker>("/planning/target_point", 10);
@@ -117,19 +118,22 @@ private:
         }
         steer = max(-max_steer_, min(max_steer_, steer));
 
-        // 조향 둔감대 (Soft Deadband) - 비틀거림 방지
-        if (abs(steer) < 0.15) {
+        // 조향 둔감대 (Soft Deadband) - 0.15→0.08 rad로 축소 (8.6°→4.6°)
+        // 너무 크면 작은 수정량도 잘라내서 오차가 누적됨
+        if (abs(steer) < 0.08) {
             steer = steer * 0.5;
         }
 
-        // 조향 스무딩 필터 (50Hz 출력 맞춰 반응성 향상: α 0.6→0.75)
-        smoothed_steer_ = (0.75 * steer) + (0.25 * smoothed_steer_);
-
-        // 3. 코너링 감속 & 최종 속도 결정
+        // 3. 코너링 감속: smoothed_steer_ 대신 순간값 steer 사용
+        // [핵심 수정] smoothed_steer_(누적값) 사용 시 피드백 루프 발생:
+        //   누적 steer 큼 → 속도 감소 → lookahead 단축 → steer 더 커짐 → 루프 반복
         if (abs(final_target_v) > 0.01) {
-            double cornering_factor = 1.0 - (abs(smoothed_steer_) / max_steer_) * 0.6;
+            double cornering_factor = 1.0 - (abs(steer) / max_steer_) * 0.6;
             final_target_v = final_target_v * cornering_factor;
         }
+
+        // 조향 스무딩 필터 (cornering 계산 후 적용)
+        smoothed_steer_ = (0.75 * steer) + (0.25 * smoothed_steer_);
 
         // 속도 하한 클리핑
         if (abs(final_target_v) > 0.01 && abs(final_target_v) < min_speed_) {

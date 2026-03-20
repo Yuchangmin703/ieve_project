@@ -10,8 +10,9 @@ public:
             "/joy_drive", 10,
             std::bind(&DriveMuxNode::joyCallback, this, std::placeholders::_1));
 
+        // 큐 1: 오래된 auto_drive 명령 누적 방지
         auto_sub_ = create_subscription<ackermann_msgs::msg::AckermannDriveStamped>(
-            "/auto_drive", 10,
+            "/auto_drive", 1,
             std::bind(&DriveMuxNode::autoCallback, this, std::placeholders::_1));
 
         mode_sub_ = create_subscription<std_msgs::msg::Bool>(
