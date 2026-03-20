@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # ieve_project2
 =======
 본 프로젝트는 **Hanyang University Future Automobile Engineering** F1TENTH 팀의 자율주행코드 문서입니다.
