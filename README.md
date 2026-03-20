@@ -1,69 +1,49 @@
 # ieve_project2
-=======
-본 프로젝트는 **Hanyang University Future Automobile Engineering** F1TENTH 팀의 자율주행코드 문서입니다.
 
-## 🔌 1. 하드웨어 포트 권한 부여
+## 🚀 2. 시스템 노드 실행 (Jetson Zsh 환경)
 
-가장 먼저 터미널을 열고 하드웨어 통신을 위한 포트 권한을 부여한 뒤, 워크스페이스를 빌드합니다. (이 과정은 주행 전 최초 1회만 실행하면 됩니다.)
-
-### ESP32 시리얼 포트 권한 부여 (임시)
-```bash
-sudo chmod 666 /dev/ttyUSB0
+### 💻 Terminal 1: Camera Perception (Launch)
+```zsh
+source /opt/ros/humble/setup.zsh
+source install/setup.zsh
+ros2 launch perception perception.launch.py
 ```
 
-## 🚀 2. 시스템 노드 실행
+### 💻 Terminal 2: LiDAR Perception Node
+```zsh
+source /opt/ros/humble/setup.zsh
+source install/setup.zsh
+ros2 run perception_lidar perception_node8
+```
 
-### 💻 Terminal 1: 자율주행 제어기 (MPC Control)
+### 💻 Terminal 3: Path Planning
+```zsh
+source /opt/ros/humble/setup.zsh
+source install/setup.zsh
+ros2 run planning planning_node
+```
 
-```bash
-source /opt/ros/humble/setup.bash
-source install/setup.bash
+### 💻 Terminal 4: Control
+```zsh
+source /opt/ros/humble/setup.zsh
+source install/setup.zsh
 ros2 run control control_node2
 ```
 
-### 💻 Terminal 2: 하드웨어 통신 브릿지 (ESP32 Serial)
+### 💻 Terminal 5: Drive Mux & Joy
+```zsh
+source /opt/ros/humble/setup.zsh
+source install/setup.zsh
+ros2 run joy joy_node & ros2 run control joy_drive_node & ros2 run control drive_mux_node
+```
 
-```bash
-source /opt/ros/humble/setup.bash
-source install/setup.bash
+### 💻 Terminal 6: Serial Bridge (ESP32)
+최종 제어 명령을 시리얼 통신을 통해 ESP32 하드웨어로 전송합니다.
+```zsh
+source /opt/ros/humble/setup.zsh
+source install/setup.zsh
 ros2 run serial_bridge serial_node2
 ```
-
-### 💻 Terminal 3: 조이스틱 하드웨어 드라이버
-
-*(로지텍 F710 등 조이스틱이 USB에 연결되어 있어야 합니다.)*
-
-```bash
-source /opt/ros/humble/setup.bash
-source install/setup.bash
-ros2 run joy joy_node
-```
-
-### 💻 Terminal 4: 조이스틱 신호 변환기 (Joy to Drive)
-
-*(주의: `[패키지명]`을 해당 코드가 위치한 패키지 이름으로 수정하세요.)*
-
-```bash
-source /opt/ros/humble/setup.bash
-source install/setup.bash
-ros2 run control joy_drive_node
-```
-
-### 💻 Terminal 5: 주행 모드 교통경찰 (Drive Mux)
-
-```bash
-source /opt/ros/humble/setup.bash
-source install/setup.bash
-ros2 run control drive_mux_node
-```
----
-
-# 🏎️ F1TENTH Vehicle Control System (ESP32)
-
-그동안 정말 많은 하드웨어 트러블슈팅과 튜닝의 산을 넘으셨네요! 낡은 L298N 드라이버에서 고성능 MD20A로 업그레이드된 내역, 접촉 불량과 신호 드랍을 잡기 위해 5V로 전원을 옮긴 부분, 그리고 실제 타이어 크기와 튜닝된 PID 게인 값까지 모두 현재 상태에 맞춰 완벽하게 수정했습니다.
-
-아래 마크다운 텍스트를 복사해서 기존 `README.md` 파일에 그대로 덮어쓰시면 됩니다!
-
 ---
 
 ## 📌 Pin Mapping
