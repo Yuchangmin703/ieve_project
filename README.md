@@ -44,6 +44,12 @@ source /opt/ros/humble/setup.zsh
 source install/setup.zsh
 ros2 run serial_bridge serial_node2
 ```
+### 💻 Terminal 7: Lidar Streaming
+```zsh
+source /opt/ros/humble/setup.zsh
+source install/setup.zsh
+ros2 run urg_node urg_node_driver --ros-args -p ip_address:=192.168.0.10
+```
 ---
 
 ## 📌 Pin Mapping
