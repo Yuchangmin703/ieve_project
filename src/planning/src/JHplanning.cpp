@@ -54,13 +54,17 @@ public:
         start_skip_ = 20;        // 내 차 바로 앞쪽 경로 버리기 (개수) — 70→20: 반응속도 개선
         jump_smooth_range_ = 30; // 차선 변경(점프) 시 앞뒤로 스킵할 범위 (개수)
         
-        // ⭐ 5. 경로 탐색 및 점프 반경 (m) - [신규 추가!]
+        // 5. 경로 탐색 및 점프 반경 (m)
         max_search_radius_ = 0.1;     // 평상시 다음 점을 이을 최대 간격 (m)
-        jump_search_radius_ = 1.5;    // [핵심!] 장애물 발견 시 허용할 '차선 점프' 최대 거리 (0.6 -> 1.5로 대폭 증가!)
+        jump_search_radius_ = 1.5;    // 장애물 발견 시 허용할 '차선 점프' 최대 거리
         
         // 6. 장애물 회피 버블 크기 (m)
         bubble_a_radius_ = 0.1;    // 차선 점들을 지워버릴 1차 범위 (m)
         bubble_b_radius_ = 0.3;    // 회피를 결심할 2차 위험 범위 (m)
+
+        // ⭐ 7. [NEW] 경로 직선 연장(Extrapolation) 안정화 기준점 설정
+        extrapolate_base_idx_ = 5;  // 방향을 결정할 앞쪽 끝점 (뒤에서 5번째)
+        extrapolate_ref_idx_ = 15;  // 방향을 결정할 뒤쪽 기준점 (뒤에서 15번째)
         
         // =====================================================================
 
@@ -78,11 +82,11 @@ public:
         path_vis_pub_ = this->create_publisher<visualization_msgs::msg::Marker>("/planning/path_vis", 10); 
         speed_text_pub_ = this->create_publisher<visualization_msgs::msg::Marker>("/planning/speed_text", 10); 
 
-        target_speed_ = 1.0; // 초기값 (데이터 들어오면 즉시 덮어씌워짐)
+        target_speed_ = 1.0; 
         
         lidar_to_base_offset_x_ = 0.0;  
 
-        RCLCPP_INFO(this->get_logger(), "🏁 [Planner] 튜닝 패널 적용 완료! 차선 점프 반경이 1.5m로 확장되었습니다.");
+        RCLCPP_INFO(this->get_logger(), "🏁 [Planner] 튜닝 패널 적용 완료! 안정화된 꼬리 자르기 경로 연장이 적용됩니다.");
     }
 
 private:
@@ -166,7 +170,6 @@ private:
                         min_dist_to_P = dist_P;
                     }
 
-                    // ⭐ 장애물 근처에서는 점프 반경을 크게 확장!
                     current_search_radius = jump_search_radius_; 
                     
                     for (size_t p_idx = current_idx + 1; p_idx < points.size(); ++p_idx) {
@@ -183,13 +186,10 @@ private:
                 }
             }
 
-            // 최적화 2단계: 인덱스 전진 탐색 & 조기 종료
             for (size_t i = current_idx + 1; i < points.size(); ++i) { 
                 if (points[i].visited) continue;
 
-                if (points[i].x - current_point.x > current_search_radius) {
-                    break; 
-                }
+                if (points[i].x - current_point.x > current_search_radius) break; 
 
                 float dist = hypot(points[i].x - current_point.x, points[i].y - current_point.y);
                 if (dist < min_dist && dist < current_search_radius) { 
@@ -206,7 +206,7 @@ private:
             current_point = points[next_idx];
         }
 
-        // 경로 스킵 로직 (위의 멤버 변수 파라미터 적용)
+        // 경로 스킵 로직
         vector<Point2D> smoothed_path;
         smoothed_path.push_back({0.0f, 0.0f, true}); 
 
@@ -235,26 +235,30 @@ private:
         }
 
         final_path = smoothed_path;
+        
         // ========================================================
-        // ⭐ [안정화 업데이트] 경로 직선 연장 (Linear Extrapolation)
-        // 노이즈 방지를 위해 마지막 점과 '뒤에서 10번째 점'을 연결!
+        // ⭐ [NEW] 안정화 업데이트: 꼬리 자르기 & 직선 연장 로직 (장애물 관통 방지 탑재!)
         // ========================================================
         int path_size = final_path.size();
         if (path_size >= 2) {
-            Point2D p_last = final_path.back();
+            int base_idx = std::max(0, path_size - extrapolate_base_idx_);
+            int ref_idx = std::max(0, path_size - extrapolate_ref_idx_);
             
-            // ⭐ 뒤에서 10번째 점을 찾습니다. (만약 전체 점이 10개가 안 되면 제일 첫 번째 점을 사용)
-            int prev_idx = std::max(0, path_size - 10);
-            Point2D p_prev = final_path[prev_idx];
+            Point2D p_base = final_path[base_idx];
+            Point2D p_ref = final_path[ref_idx];
 
-            // 두 점 사이의 방향각(Heading) 계산
-            float dx = p_last.x - p_prev.x;
-            float dy = p_last.y - p_prev.y;
+            float dx = p_base.x - p_ref.x;
+            float dy = p_base.y - p_ref.y;
             
-            // 거리가 너무 짧으면(1cm 이하) 계산 스킵
             float dist_check = std::hypot(dx, dy);
             if (dist_check > 0.01f) { 
                 float heading = std::atan2(dy, dx);
+
+                // ✂️ [핵심 수술!] 노이즈가 낀 썩은 꼬리(base_idx 이후의 점들)를 과감하게 잘라버립니다!
+                final_path.erase(final_path.begin() + base_idx + 1, final_path.end());
+                
+                // 이제 연장선이 출발할 진짜 마지막 점은 안정적인 'p_base'가 됩니다.
+                Point2D p_last = final_path.back();
 
                 // 1.0m 연장 (0.1m 간격으로 10개의 가짜 점 생성)
                 float extend_dist = 1.0f;
@@ -266,19 +270,33 @@ private:
                     ext_pt.x = p_last.x + (std::cos(heading) * step_size * i);
                     ext_pt.y = p_last.y + (std::sin(heading) * step_size * i);
                     ext_pt.visited = true;
+
+                    // 🛑 [핵심 방어 로직] 이 가짜 점이 장애물을 파고드는가?
+                    bool hit_obstacle = false;
+                    for (const auto& obs : obstacles_) {
+                        // 장애물과의 거리가 bubble_b_radius_ (회피 위험 반경) 이내라면!
+                        if (std::hypot(ext_pt.x - obs.x, ext_pt.y - obs.y) < bubble_b_radius_) {
+                            hit_obstacle = true;
+                            break;
+                        }
+                    }
+
+                    // 장애물에 닿기 직전이라면, 더 이상의 경로 연장을 즉시 중단합니다!
+                    if (hit_obstacle) {
+                        break; 
+                    }
+
                     final_path.push_back(ext_pt);
                 }
             }
         }
         // ========================================================
-        // 동적 최대 속도 생성 로직 (위의 멤버 변수 파라미터 적용)
-        // ========================================================
         
+        // 동적 최대 속도 생성 로직
         float V_p = v_max_;
         if (min_dist_to_P <= d_min_) {
             V_p = v_min_;
         } else if (min_dist_to_P < d_max_) {
-            // C6: d_max_ == d_min_ 이면 0나눔 → fallback
             float d_range = d_max_ - d_min_;
             if (d_range > 1e-4f) {
                 V_p = v_min_ + (v_max_ - v_min_) * ((min_dist_to_P - d_min_) / d_range);
@@ -298,7 +316,6 @@ private:
             if (angle_Q >= a_max_rad) {
                 V_q = v_min_;
             } else if (angle_Q > a_min_rad) {
-                // C6: a_max_rad == a_min_rad 이면 0나눔 → fallback
                 float a_range = a_max_rad - a_min_rad;
                 if (a_range > 1e-6f) {
                     V_q = v_max_ - (v_max_ - v_min_) * ((angle_Q - a_min_rad) / a_range);
@@ -309,10 +326,8 @@ private:
         }
 
         target_speed_ = std::min(V_p, V_q);
-        // C7: NaN/Inf 속도가 하드웨어로 전달되지 않도록 방어
         if (!std::isfinite(target_speed_)) target_speed_ = v_min_;
 
-        // 시각화 퍼블리시
         publish_path_visualization(final_path, v_min_, v_max_);
         publish_speed_text(target_speed_);
 
@@ -435,6 +450,10 @@ private:
     float d_max_, d_min_;
     float a_min_deg_, a_max_deg_;
     int start_skip_, jump_smooth_range_;
+
+    // ⭐ 새로 추가된 Extrapolation 멤버 변수
+    int extrapolate_base_idx_;
+    int extrapolate_ref_idx_;
 
     // 기존 멤버 변수
     float target_speed_;
