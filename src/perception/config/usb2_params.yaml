@@ -5,28 +5,47 @@ camera:
   distortion_model: plumb_bob
 
 intrinsics:
-  fx: 508.0764
-  fy: 678.3076
-  cx: 329.8464
-  cy: 269.4065
-  k1: -0.409645
-  k2: 0.145633
-  p1: 0.0
-  p2: 0.0
-  k3: 0.0
+  # [정밀 데이터] 0.3508px 오차율 기반 원본 값
+  fx: 672.94664
+  fy: 678.60968
+  cx: 342.41670
+  cy: 251.36037
+  k1: -0.442943
+  k2: 0.330594
+  p1: 0.000000
+  p2: 0.000000
+  k3: 0.000000
 
 extrinsics:
-  # 사용자님의 요청에 따라 이 부분은 원래 값 그대로 유지합니다.
-  pitch_deg: 31.1608
-  yaw_deg: 0.0
-  roll_deg: -0.8549
-  height_m: 0.2735
+  pitch_deg: 14.7260
+  yaw_deg: 0.0000    # 측정값 없을 시 0
+  roll_deg: 0.0000   # 측정값 없을 시 0
+  height_m: 0.274
 
 bev:
-  # ★★ 중요: 현재 카메라 각도에서 확실히 보일 만한, 더 먼 영역으로 수정 ★★
-  x_min: 0.50      # 너무 가까운 10cm 대신, 50cm 앞부터 보도록 수정
-  x_max: 1.50      # 최대 거리는 그대로 유지
-  y_min: -0.50     # 좌우 폭을 약간 줄여서 화면 안에 들어올 확률을 높임
-  y_max: 0.50
-  output_width: 500
-  output_height: 700
+  x_min: 0.12
+  x_max: 2.0
+  y_min: -0.85
+  y_max: 0.85
+  output_width: 480
+  output_height: 640
+  #내부 파라미터 오차율 0.3508픽셀 외부파라미터는 그냥 높이만 직접 수정
+  
+metric:
+  meters_per_pixel_x: 0.003151
+  meters_per_pixel_y: 0.003151
+
+  origin_u: 320.0
+  origin_v: 479.0
+
+  bev_origin_to_camera_x_m: 0.43
+  bev_origin_to_camera_y_m: 0.0
+
+  camera_to_base_x_m: -0.23
+  camera_to_base_y_m: 0.0
+
+viz_metric:
+  x_min: 0.0
+  x_max: 1.8
+  y_min: -0.7
+  y_max: 0.7

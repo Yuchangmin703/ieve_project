@@ -48,7 +48,7 @@ ament_target_dependencies(JHplanning_node
 )
 
 # ----------------------------------------------------
-# 4. 설치 (Install) 규칙 - 더미 노드 삭제함
+# 4. 설치 (Install) 규칙 - 더미 노드 완벽 삭제됨!
 # ----------------------------------------------------
 install(TARGETS
   planning_node

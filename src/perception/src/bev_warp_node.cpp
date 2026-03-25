@@ -3,19 +3,40 @@
 #include <image_transport/image_transport.hpp>
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
+#include <yaml-cpp/yaml.h>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <vector>
 
 class BevWarpNode : public rclcpp::Node {
 public:
     BevWarpNode() : Node("bev_warp_node") {
-        double fx = 499.74665, fy = 712.17893, cx = 325.37045, cy = 246.26333;
-        double h_m = 0.2735, pitch_deg = 23.6602;
+        // 1. 카메라 타입 파라미터 (Launch에서 전달받음)
+        declare_parameter<std::string>("camera_type", "HW40");
+        std::string cam_type = get_parameter("camera_type").as_string();
+        
+        // 2. 패키지 경로에서 YAML Config 파일 찾기
+        std::string pkg_share = ament_index_cpp::get_package_share_directory("perception");
+        std::string config_path = (cam_type == "HW40") ? 
+            pkg_share + "/config/hw40_params.yaml" : pkg_share + "/config/usb2_params.yaml";
+        
+        YAML::Node cfg = YAML::LoadFile(config_path);
+
+        // [YAML에서 파라미터 불러오기]
+        double fx = cfg["intrinsics"]["fx"].as<double>();
+        double fy = cfg["intrinsics"]["fy"].as<double>();
+        double cx = cfg["intrinsics"]["cx"].as<double>();
+        double cy = cfg["intrinsics"]["cy"].as<double>();
+
+        double pitch_deg = cfg["extrinsics"]["pitch_deg"].as<double>();
+        double h_m = cfg["extrinsics"]["height_m"].as<double>();
         double pitch_rad = pitch_deg * CV_PI / 180.0;
 
-        // 가시 범위 설정 (화면 꽉 채우기 및 왜곡 최소화)
-        double x_min = 0.12, x_max = 2.0; 
-        double y_min = -0.85, y_max = 0.85; 
-        int out_w = 480, out_h = 640;
+        double x_min = cfg["bev"]["x_min"].as<double>();
+        double x_max = cfg["bev"]["x_max"].as<double>();
+        double y_min = cfg["bev"]["y_min"].as<double>();
+        double y_max = cfg["bev"]["y_max"].as<double>();
+        int out_w = cfg["bev"]["output_width"].as<int>();
+        int out_h = cfg["bev"]["output_height"].as<int>();
 
         std::vector<cv::Point2f> src_pts, dst_pts;
         auto world_to_bev_pixel = [&](double wx, double wy) {
@@ -41,6 +62,8 @@ public:
         sub_ = image_transport::create_subscription(this, "/perception/camera/undistorted", 
             std::bind(&BevWarpNode::cb, this, std::placeholders::_1), "raw");
         pub_ = image_transport::create_publisher(this, "/perception/bev/image");
+        
+        RCLCPP_INFO(get_logger(), "BEV Warp Node Initialized with %s config.", cam_type.c_str());
     }
 
 private:

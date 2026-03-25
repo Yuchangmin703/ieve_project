@@ -1,50 +1,97 @@
 import os
 import subprocess
+import yaml
+
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess, TimerAction, RegisterEventHandler
-from launch.event_handlers import OnProcessStart
+from launch.actions import ExecuteProcess, TimerAction, DeclareLaunchArgument
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
+
 def get_camera_info():
-    # v4l2-ctl 명령어를 통해 현재 연결된 장치 리스트 확인
     output = subprocess.getoutput('v4l2-ctl --list-devices')
-    
-    # HW40 우선 탐색
+
     if "HW40" in output:
-        # grep과 head를 이용해 정확한 /dev/videoX 경로 추출
-        dev = subprocess.getoutput('v4l2-ctl --list-devices | grep -A 1 "HW40" | grep "/dev/video" | head -n 1').strip()
-        # xargs나 strip으로 공백 제거 후 첫 번째 장치만 선택
-        dev = dev.split()[0] if dev else "/dev/video0"
-        return "HW40", dev
-    
-    # USB 2.0 Camera 탐색
+        dev = subprocess.getoutput(
+            'v4l2-ctl --list-devices | grep -A 1 "HW40" | grep "/dev/video" | head -n 1'
+        ).strip()
+        return "HW40", dev.split()[0] if dev else "/dev/video0"
+
     elif "USB 2.0 Camera" in output:
-        dev = subprocess.getoutput('v4l2-ctl --list-devices | grep -A 1 "USB 2.0 Camera" | grep "/dev/video" | head -n 1').strip()
-        dev = dev.split()[0] if dev else "/dev/video0"
-        return "USB2", dev
-        
+        dev = subprocess.getoutput(
+            'v4l2-ctl --list-devices | grep -A 1 "USB 2.0 Camera" | grep "/dev/video" | head -n 1'
+        ).strip()
+        return "USB2", dev.split()[0] if dev else "/dev/video0"
+
     return "UNKNOWN", "/dev/video0"
+
 
 def generate_launch_description():
     pkg_share = get_package_share_directory('perception')
     cam_type, dev_path = get_camera_info()
-    
-    # 설정 파일 및 스크립트 경로
     script_path = os.path.join(pkg_share, 'scripts', 'camera_auto_setup.sh')
 
-    # [Action 1] 하드웨어 설정 스크립트 실행 정의
+    yaml_file_name = 'hw40_params.yaml' if cam_type == 'HW40' else 'usb2_params.yaml'
+    yaml_path = os.path.join(pkg_share, 'config', yaml_file_name)
+
+    with open(yaml_path, 'r') as f:
+        config_data = yaml.safe_load(f)
+
+    bev_cfg = config_data['bev']
+    metric_cfg = config_data['metric']
+    viz_metric_cfg = config_data['viz_metric']
+
+    global_bev_params = [
+        {'bev_x_min': float(bev_cfg['x_min'])},
+        {'bev_x_max': float(bev_cfg['x_max'])},
+        {'bev_y_min': float(bev_cfg['y_min'])},
+        {'bev_y_max': float(bev_cfg['y_max'])},
+    ]
+
+    global_res_params = [
+        {'width': int(bev_cfg['output_width'])},
+        {'height': int(bev_cfg['output_height'])},
+    ]
+
+    global_metric_params = [
+        {'meters_per_pixel_x': float(metric_cfg['meters_per_pixel_x'])},
+        {'meters_per_pixel_y': float(metric_cfg['meters_per_pixel_y'])},
+        {'origin_u': float(metric_cfg['origin_u'])},
+        {'origin_v': float(metric_cfg['origin_v'])},
+        {'bev_origin_to_camera_x_m': float(metric_cfg['bev_origin_to_camera_x_m'])},
+        {'bev_origin_to_camera_y_m': float(metric_cfg['bev_origin_to_camera_y_m'])},
+        {'camera_to_base_x_m': float(metric_cfg['camera_to_base_x_m'])},
+        {'camera_to_base_y_m': float(metric_cfg['camera_to_base_y_m'])},
+    ]
+    global_viz_metric_params = [
+        {'viz_x_min': float(viz_metric_cfg['x_min'])},
+        {'viz_x_max': float(viz_metric_cfg['x_max'])},
+        {'viz_y_min': float(viz_metric_cfg['y_min'])},
+        {'viz_y_max': float(viz_metric_cfg['y_max'])},
+    ]
+
+    use_viz_arg = DeclareLaunchArgument(
+        'use_viz',
+        default_value='true',
+        description='Enable perception visualization node'
+    )
+
+    debug_arg = DeclareLaunchArgument(
+        'publish_debug',
+        default_value='true',
+        description='Enable intermediate debug image publishing'
+    )
+
     camera_setup = ExecuteProcess(
         cmd=['bash', script_path],
         output='screen'
     )
 
-    # [Action 2] 노드 실행 정의 (TimerAction으로 감싸서 지연 실행)
-    # 스크립트가 실행되고 약 2초 후에 노드들이 뜨도록 설정합니다.
     nodes_to_start = TimerAction(
-        period=2.0,  # 2초 대기
+        period=2.0,
         actions=[
-            # 1. Undistort Node
             Node(
                 package='perception',
                 executable='undistort_node',
@@ -53,51 +100,85 @@ def generate_launch_description():
                 parameters=[
                     {'device_path': dev_path},
                     {'camera_type': cam_type},
-                    {'fps': 30},
+                    {'fps': 30}
                 ]
             ),
 
-            # 2. BEV Warp Node
             Node(
                 package='perception',
                 executable='bev_warp_node',
                 name='bev_warp_node',
                 output='screen',
                 parameters=[
-                    {'width': 640}, {'height': 480},
-                    {'h_top': 240}, {'h_bottom': 480},
-                    {'w_top': 200}, {'w_bottom': 640},
+                    {'camera_type': cam_type}
                 ]
             ),
 
-            # 3. Lane Candidate Mask Node
             Node(
                 package='perception',
                 executable='lane_candidate_mask_node',
                 name='lane_candidate_mask_node',
                 output='screen',
                 parameters=[
-                    {'publish_debug': True},
-                    # 여기서 파라미터를 직접 넘겨줄 수도 있습니다.
+                    {'publish_debug': LaunchConfiguration('publish_debug')},
+                    
+                    # 1. 흰색 (White) 파라미터
+                    {'strict_white_v_min': 105},
+                    {'loose_white_v_min': 90},
+                    {'white_s_max': 25},
+                    
+                    # 2. 검은 도로 (Black) 파라미터
                     {'black_v_min': 0},
-                    {'black_v_max': 150},
-                ]
+                    {'black_v_max': 125},
+                    
+                    # 3. 노란색 차선 (Yellow) 파라미터
+                    {'yellow_h_min': 20},
+                    {'yellow_h_max': 35},
+                    {'yellow_s_min': 70},
+                    {'yellow_s_max': 180},
+                    {'yellow_v_min': 145},
+                    {'yellow_v_max': 255},
+                    
+                    # 4. 노이즈 사냥꾼 & 형태학적(Morphology) 커널 사이즈
+                    {'tophat_size': 20},
+                    {'blast_size': 25},
+                    {'noise_eraser_size': 3},
+                    
+                    # 5. 팽창(Fat) 방어벽 세팅
+                    {'yellow_fat_radius': 6},
+                    {'black_fat_radius': 10},
+                    {'seed_row_from_bottom': 50}
+                ] + global_bev_params  # ⭐ C++ 노드의 BEV 물리적 거리 연동!
             ),
 
-            # 4. Centerline Extractor Node
             Node(
                 package='perception',
                 executable='centerline_extractor_node',
                 name='centerline_extractor_node',
                 output='screen',
                 parameters=[
+                    {'publish_debug': LaunchConfiguration('publish_debug')},
                     {'frame_id': 'base_link'},
-                ]
+                    {'y_thresh': 0.25},
+                    {'x_thresh': 0.60},
+                    {'min_lane_pts': 30}
+                ] + global_res_params + global_metric_params
+            ),
+
+            Node(
+                package='perception',
+                executable='perception_viz_node',
+                name='perception_viz_node',
+                output='screen',
+                parameters=global_viz_metric_params,
+                condition=IfCondition(LaunchConfiguration('use_viz'))
             ),
         ]
     )
 
     return LaunchDescription([
-        camera_setup,   # 먼저 스크립트 실행 시작
-        nodes_to_start  # 2초 뒤에 노드들 실행
+        use_viz_arg,
+        debug_arg,
+        camera_setup,
+        nodes_to_start
     ])

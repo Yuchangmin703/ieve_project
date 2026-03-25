@@ -39,8 +39,8 @@ public:
         // =====================================================================
         
         // 1. 절대 속도 제한 (m/s)
-        v_max_ = 1.0f; // 직선이나 뻥 뚫린 길에서 달릴 '최고 속도'
-        v_min_ = 0.5f; // 급코너나 장애물 앞에서 기어갈 '최저 속도'
+        v_max_ = 0.4f; // 직선이나 뻥 뚫린 길에서 달릴 '최고 속도'
+        v_min_ = 0.2f; // 급코너나 장애물 앞에서 기어갈 '최저 속도'
 
         // 2. 장애물 감속 거리 (m)
         d_max_ = 1.5f; // 이 거리 안으로 장애물이 들어오면 슬슬 브레이크 밟기 시작
@@ -53,6 +53,14 @@ public:
         // 4. 경로 부드럽게 만들기 (스킵 파라미터)
         start_skip_ = 20;        // 내 차 바로 앞쪽 경로 버리기 (개수) — 70→20: 반응속도 개선
         jump_smooth_range_ = 30; // 차선 변경(점프) 시 앞뒤로 스킵할 범위 (개수)
+        
+        // ⭐ 5. 경로 탐색 및 점프 반경 (m) - [신규 추가!]
+        max_search_radius_ = 0.1;     // 평상시 다음 점을 이을 최대 간격 (m)
+        jump_search_radius_ = 1.5;    // [핵심!] 장애물 발견 시 허용할 '차선 점프' 최대 거리 (0.6 -> 1.5로 대폭 증가!)
+        
+        // 6. 장애물 회피 버블 크기 (m)
+        bubble_a_radius_ = 0.1;    // 차선 점들을 지워버릴 1차 범위 (m)
+        bubble_b_radius_ = 0.3;    // 회피를 결심할 2차 위험 범위 (m)
         
         // =====================================================================
 
@@ -72,14 +80,9 @@ public:
 
         target_speed_ = 1.0; // 초기값 (데이터 들어오면 즉시 덮어씌워짐)
         
-        max_search_radius_ = 0.1;      
-        jump_search_radius_ = 0.6;     
-        bubble_a_radius_ = 0.1;    
-        bubble_b_radius_ = 0.3;    
-        
         lidar_to_base_offset_x_ = 0.0;  
 
-        RCLCPP_INFO(this->get_logger(), "🏁 [Planner] 튜닝 패널 적용 완료! 파라미터를 쉽게 변경할 수 있습니다.");
+        RCLCPP_INFO(this->get_logger(), "🏁 [Planner] 튜닝 패널 적용 완료! 차선 점프 반경이 1.5m로 확장되었습니다.");
     }
 
 private:
@@ -163,6 +166,7 @@ private:
                         min_dist_to_P = dist_P;
                     }
 
+                    // ⭐ 장애물 근처에서는 점프 반경을 크게 확장!
                     current_search_radius = jump_search_radius_; 
                     
                     for (size_t p_idx = current_idx + 1; p_idx < points.size(); ++p_idx) {
@@ -231,7 +235,41 @@ private:
         }
 
         final_path = smoothed_path;
+        // ========================================================
+        // ⭐ [안정화 업데이트] 경로 직선 연장 (Linear Extrapolation)
+        // 노이즈 방지를 위해 마지막 점과 '뒤에서 10번째 점'을 연결!
+        // ========================================================
+        int path_size = final_path.size();
+        if (path_size >= 2) {
+            Point2D p_last = final_path.back();
+            
+            // ⭐ 뒤에서 10번째 점을 찾습니다. (만약 전체 점이 10개가 안 되면 제일 첫 번째 점을 사용)
+            int prev_idx = std::max(0, path_size - 10);
+            Point2D p_prev = final_path[prev_idx];
 
+            // 두 점 사이의 방향각(Heading) 계산
+            float dx = p_last.x - p_prev.x;
+            float dy = p_last.y - p_prev.y;
+            
+            // 거리가 너무 짧으면(1cm 이하) 계산 스킵
+            float dist_check = std::hypot(dx, dy);
+            if (dist_check > 0.01f) { 
+                float heading = std::atan2(dy, dx);
+
+                // 1.0m 연장 (0.1m 간격으로 10개의 가짜 점 생성)
+                float extend_dist = 1.0f;
+                float step_size = 0.1f;
+                int steps = static_cast<int>(extend_dist / step_size);
+
+                for (int i = 1; i <= steps; ++i) {
+                    Point2D ext_pt;
+                    ext_pt.x = p_last.x + (std::cos(heading) * step_size * i);
+                    ext_pt.y = p_last.y + (std::sin(heading) * step_size * i);
+                    ext_pt.visited = true;
+                    final_path.push_back(ext_pt);
+                }
+            }
+        }
         // ========================================================
         // 동적 최대 속도 생성 로직 (위의 멤버 변수 파라미터 적용)
         // ========================================================

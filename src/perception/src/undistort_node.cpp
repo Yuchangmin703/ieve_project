@@ -76,9 +76,7 @@ private:
       header.stamp = now();
       header.frame_id = frame_id_;
 
-      cv::Mat raw_img;
-      cv::resize(frame, raw_img, cv::Size(1280, 960));
-      pub_raw_.publish(*cv_bridge::CvImage(header, "bgr8", raw_img).toImageMsg());
+      pub_raw_.publish(*cv_bridge::CvImage(header, "bgr8", frame).toImageMsg());
 
       cv::Mat undistorted;
       cv::remap(frame, undistorted, undistort_map_x_, undistort_map_y_, cv::INTER_LINEAR);

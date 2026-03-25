@@ -10,26 +10,53 @@ class LaneCandidateMaskNode : public rclcpp::Node {
 public:
   LaneCandidateMaskNode() : Node("lane_candidate_mask_node") {
     // ==========================================================
-    // ⭐ [파라미터 선언부] 모든 핵심 변수를 실시간 조절 가능
+    // ⭐ [종합 컨트롤 타워] 모든 핵심 파라미터를 여기서 관리합니다!
     // ==========================================================
-    declare_parameter<int>("strict_white_v_min", 140); // 진짜 차선 기준 (엄격)
-    declare_parameter<int>("loose_white_v_min", 110);  // 배경 덩어리 검출용 (넉넉하게)
-    declare_parameter<int>("white_s_max", 60);  
     
+    // ----------------------------------------------------------
+    // 1. 흰색 차선 (White) 파라미터
+    // ----------------------------------------------------------
+    declare_parameter<int>("strict_white_v_min", 105); 
+    declare_parameter<int>("loose_white_v_min", 90);  
+    declare_parameter<int>("white_s_max", 25);         
+
+    // ----------------------------------------------------------
+    // 2. 검은 도로 (Black) 파라미터
+    // ----------------------------------------------------------
     declare_parameter<int>("black_v_min", 0);  
-    declare_parameter<int>("black_v_max", 100); 
+    declare_parameter<int>("black_v_max", 125);        
+
+    // ----------------------------------------------------------
+    // 3. 노란색 차선 (Yellow) 파라미터
+    // ----------------------------------------------------------
+    declare_parameter<int>("yellow_h_min", 20);  
+    declare_parameter<int>("yellow_h_max", 35);  
+    declare_parameter<int>("yellow_s_min", 70);  
+    declare_parameter<int>("yellow_s_max", 180); 
+    declare_parameter<int>("yellow_v_min", 145); 
+    declare_parameter<int>("yellow_v_max", 255); 
+
+    // ----------------------------------------------------------
+    // 4. 노이즈 사냥꾼 & 형태학적(Morphology) 필터 사이즈
+    // ----------------------------------------------------------
+    declare_parameter<int>("tophat_size", 45);       
+    declare_parameter<int>("blast_size", 50);        
+    declare_parameter<int>("noise_eraser_size", 4);  
     
-    // 거대한 배경 덩어리 사냥꾼 파라미터 (Top-Hat)
-    declare_parameter<int>("tophat_size", 15); // 얇은 선을 지우고 덩어리만 남기는 커널 크기
-    declare_parameter<int>("blast_size", 17);  // 남은 덩어리를 뚱뚱하게 팽창시키는 커널 크기
+    // ----------------------------------------------------------
+    // 5. 팽창(Fat) 방어벽 & 잉크 확산(FloodFill) 세팅
+    // ----------------------------------------------------------
+    declare_parameter<int>("yellow_fat_radius", 13); 
+    declare_parameter<int>("black_fat_radius", 20);  
+    declare_parameter<int>("seed_row_from_bottom", 50); 
 
-    // ⭐ [NEW] 잔챙이 노이즈 사냥꾼 파라미터 (선생님 아이디어)
-    // 5로 설정하면 5x5픽셀(약 1.7cm) 이하의 얇은 빛 가닥들은 모조리 지워집니다.
-    declare_parameter<int>("noise_eraser_size", 5); 
-
-    declare_parameter<int>("yellow_fat_radius", 15); 
-    declare_parameter<int>("black_fat_radius", 10);   
-    declare_parameter<int>("seed_row_from_bottom", 50);
+    // ----------------------------------------------------------
+    // 6. BEV(탑뷰) 물리적 거리 파라미터 (단위: 미터)
+    // ----------------------------------------------------------
+    declare_parameter<double>("bev_x_min", 0.12); 
+    declare_parameter<double>("bev_x_max", 2.0);  
+    declare_parameter<double>("bev_y_min", -0.85); 
+    declare_parameter<double>("bev_y_max", 0.85);  
 
     // ==========================================================
     // 토픽 Subscriber & Publisher 세팅
@@ -45,9 +72,9 @@ public:
     pub_yellow_ = image_transport::create_publisher(this, "/perception/debug/yellow"); 
     pub_overlay_ = image_transport::create_publisher(this, "/perception/debug/overlay");
     
-    // 디버깅용 110 그물망 & 배경 덩어리 송출
     pub_loose_white_ = image_transport::create_publisher(this, "/perception/debug/loose_white");
     pub_massive_white_ = image_transport::create_publisher(this, "/perception/debug/massive_white");
+    pub_strict_white_ = image_transport::create_publisher(this, "/perception/debug/strict_white");
 
     pub_border_marker_ = this->create_publisher<visualization_msgs::msg::Marker>("/perception/debug/bev_border", 10);
   }
@@ -68,72 +95,61 @@ private:
     // ==========================================================
     cv::Mat loose_white_mask, strict_white_mask, black_mask, yellow_mask;
     
-    // ① 배경 덩어리를 넉넉하게 잡기 위한 '느슨한' 흰색 마스크
     cv::inRange(hsv, cv::Scalar(0, 0, get_parameter("loose_white_v_min").as_int()), 
                      cv::Scalar(180, get_parameter("white_s_max").as_int(), 255), loose_white_mask);
     
-    // ② 진짜 차선만 뽑아내기 위한 '엄격한' 흰색 마스크
     cv::inRange(hsv, cv::Scalar(0, 0, get_parameter("strict_white_v_min").as_int()), 
                      cv::Scalar(180, get_parameter("white_s_max").as_int(), 255), strict_white_mask);
     
     cv::inRange(hsv, cv::Scalar(0, 0, get_parameter("black_v_min").as_int()), 
                      cv::Scalar(180, 255, get_parameter("black_v_max").as_int()), black_mask);
     
-    cv::inRange(hsv, cv::Scalar(15, 80, 100), cv::Scalar(35, 255, 255), yellow_mask);
+    cv::inRange(hsv, 
+        cv::Scalar(get_parameter("yellow_h_min").as_int(), get_parameter("yellow_s_min").as_int(), get_parameter("yellow_v_min").as_int()), 
+        cv::Scalar(get_parameter("yellow_h_max").as_int(), get_parameter("yellow_s_max").as_int(), get_parameter("yellow_v_max").as_int()), 
+        yellow_mask);
 
     // ==========================================================
     // 2. 이중 필터링 + 동적 커널 사이즈를 활용한 배경 원천 차단
     // ==========================================================
     int t_size = get_parameter("tophat_size").as_int();
-    cv::Mat tophat_kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(t_size, t_size));
+    cv::Mat tophat_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(t_size, t_size));
     
     cv::Mat massive_white;
-    // '느슨한' 흰색 마스크에서 얇은 선을 지우고 거대한 덩어리만 남김
     cv::morphologyEx(loose_white_mask, massive_white, cv::MORPH_OPEN, tophat_kernel);
     
     int b_size = get_parameter("blast_size").as_int();
-    cv::Mat blast_kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(b_size, b_size));
-    
-    // 포획한 덩어리를 지정된 크기만큼 빵빵하게 부풀림
+    cv::Mat blast_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(b_size, b_size));
     cv::dilate(massive_white, massive_white, blast_kernel);
 
     cv::Mat white_mask;
-    // '엄격한' 흰색 마스크에서 뚱뚱해진 거대한 배경 덩어리를 완전히 빼버림
     cv::subtract(strict_white_mask, massive_white, white_mask);
 
-    // ==========================================================
-    // ⭐ [NEW] 잔챙이 노이즈 지우개 (선생님 아이디어 적용)
-    // 거대한 배경을 도려낸 후, 여전히 남아있는 '차선보다 얇은' 빛 가닥들을 지웁니다.
-    // ==========================================================
     int eraser_size = get_parameter("noise_eraser_size").as_int();
     if (eraser_size > 0) {
-        // 커널 크기가 짝수면 에러가 날 수 있으므로, 홀수로 보정해주는 센스!
         if (eraser_size % 2 == 0) eraser_size += 1; 
-        
-        cv::Mat eraser_kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(eraser_size, eraser_size));
-        // 열기(Open) 연산: 작은 도장보다 얇은 것들은 모두 소멸시킵니다.
+        cv::Mat eraser_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(eraser_size, eraser_size));
         cv::morphologyEx(white_mask, white_mask, cv::MORPH_OPEN, eraser_kernel);
     }
-    // ==========================================================
 
     // ==========================================================
-    // 3. 팽창(Fat) 방어벽 & 도화지 세팅
+    // 3. 팽창(Fat) 방어벽 세팅
     // ==========================================================
     cv::Mat fat_yellow;
     int y_r = get_parameter("yellow_fat_radius").as_int();
     int y_size = y_r * 2 + 1; 
-    cv::Mat yellow_kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(y_size, y_size));
+    cv::Mat yellow_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(y_size, y_size));
     cv::dilate(yellow_mask, fat_yellow, yellow_kernel);
 
     cv::Mat fat_black;
     int b_r = get_parameter("black_fat_radius").as_int();
     int b_size_black = b_r * 2 + 1;
-    cv::Mat black_kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(b_size_black, b_size_black));
+    cv::Mat black_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(b_size_black, b_size_black));
     cv::dilate(black_mask, fat_black, black_kernel);
 
-    cv::Mat expandable = fat_black.clone();
-    expandable.setTo(0, fat_yellow); 
-    cv::rectangle(expandable, cv::Point(0, 0), cv::Point(w - 1, h - 1), cv::Scalar(0), 5);
+    cv::Mat expandable = fat_black.clone(); 
+    expandable.setTo(0, fat_yellow);        
+    cv::rectangle(expandable, cv::Point(0, 0), cv::Point(w - 1, h - 1), cv::Scalar(0), 5); 
 
     cv::Mat bev_gray, bev_valid_mask;
     cv::cvtColor(bev, bev_gray, cv::COLOR_BGR2GRAY);
@@ -164,8 +180,10 @@ private:
         border_marker.color.r = 1.0f; border_marker.color.g = 0.5f; border_marker.color.b = 0.0f; border_marker.color.a = 1.0f;
         border_marker.lifetime = rclcpp::Duration::from_seconds(0.0);
 
-        double bev_x_min = 0.12, bev_x_max = 2.0;
-        double bev_y_min = -0.85, bev_y_max = 0.85;
+        double bev_x_min = get_parameter("bev_x_min").as_double();
+        double bev_x_max = get_parameter("bev_x_max").as_double();
+        double bev_y_min = get_parameter("bev_y_min").as_double();
+        double bev_y_max = get_parameter("bev_y_max").as_double();
 
         for (const auto& pt : largest_contour) {
             geometry_msgs::msg::Point p;
@@ -209,8 +227,13 @@ private:
     }
 
     cv::Mat lane_final;
-    // 완벽하게 정제된 white_mask와 잉크 확산 ROI를 겹침
     cv::bitwise_and(white_mask, roi, lane_final);
+
+    // ⭐ [NEW] 차선 연결을 위한 최종 팽창 (선생님 아이디어 적용!)
+    // 끊어진 차선을 이어주기 위해 3픽셀 두께로 살짝 뚱뚱하게 만듭니다.
+    int final_fat_size = 5; 
+    cv::Mat final_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(final_fat_size, final_fat_size));
+    cv::dilate(lane_final, lane_final, final_kernel);
 
     // ==========================================================
     // 6. ROS 이미지 토픽으로 송출 (Publish)
@@ -223,11 +246,10 @@ private:
     pub_fat_black_.publish(*cv_bridge::CvImage(h_msg, "mono8", expandable).toImageMsg());
     pub_yellow_.publish(*cv_bridge::CvImage(h_msg, "mono8", fat_yellow).toImageMsg());
     
-    // 디버깅용 토픽 송출
     pub_loose_white_.publish(*cv_bridge::CvImage(h_msg, "mono8", loose_white_mask).toImageMsg());
     pub_massive_white_.publish(*cv_bridge::CvImage(h_msg, "mono8", massive_white).toImageMsg());
+    pub_strict_white_.publish(*cv_bridge::CvImage(h_msg, "mono8", strict_white_mask).toImageMsg());
 
-    // 종합 오버레이 이미지 그리기
     cv::Mat overlay = bev.clone();
     overlay.setTo(cv::Scalar(255, 0, 0), roi);          
     overlay.setTo(cv::Scalar(0, 0, 255), fat_yellow);   
@@ -235,10 +257,9 @@ private:
     pub_overlay_.publish(*cv_bridge::CvImage(h_msg, "bgr8", overlay).toImageMsg());
   }
 
-  // Publisher 및 Subscriber 변수 선언부
   image_transport::Subscriber sub_;
   image_transport::Publisher pub_lane_mask_, pub_roi_, pub_fat_black_, pub_white_, pub_black_, pub_yellow_, pub_overlay_;
-  image_transport::Publisher pub_loose_white_, pub_massive_white_; 
+  image_transport::Publisher pub_loose_white_, pub_massive_white_, pub_strict_white_; 
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr pub_border_marker_;
 };
 
