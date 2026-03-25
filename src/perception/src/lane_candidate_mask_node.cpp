@@ -110,11 +110,23 @@ private:
         yellow_mask);
 
     // ==========================================================
-    // 2. 이중 필터링 + 동적 커널 사이즈를 활용한 배경 원천 차단
+    // ⭐ 2. [NEW] 샌드위치 필터링 (소 -> 대 -> 소)
     // ==========================================================
+    int eraser_size = get_parameter("noise_eraser_size").as_int();
+    cv::Mat eraser_kernel;
+    
+    // [1차 청소: 小] 빼기 전에 원본 마스크들에서 자잘한 노이즈(먼지) 선제거!
+    if (eraser_size > 0) {
+        if (eraser_size % 2 == 0) eraser_size += 1; 
+        eraser_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(eraser_size, eraser_size));
+        
+        cv::morphologyEx(loose_white_mask, loose_white_mask, cv::MORPH_OPEN, eraser_kernel);
+        cv::morphologyEx(strict_white_mask, strict_white_mask, cv::MORPH_OPEN, eraser_kernel);
+    }
+
+    // [큰 덩어리 추출: 大] 먼지가 털린 깔끔한 상태에서 진짜 '큰 덩어리'만 정확하게 추출
     int t_size = get_parameter("tophat_size").as_int();
     cv::Mat tophat_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(t_size, t_size));
-    
     cv::Mat massive_white;
     cv::morphologyEx(loose_white_mask, massive_white, cv::MORPH_OPEN, tophat_kernel);
     
@@ -122,13 +134,12 @@ private:
     cv::Mat blast_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(b_size, b_size));
     cv::dilate(massive_white, massive_white, blast_kernel);
 
+    // [빼기] 엄격한 마스크에서 큰 덩어리 도려내기
     cv::Mat white_mask;
     cv::subtract(strict_white_mask, massive_white, white_mask);
 
-    int eraser_size = get_parameter("noise_eraser_size").as_int();
+    // [2차 청소: 小] 도려낸 후 가장자리에 미세하게 남은 찌꺼기(Residue) 최종 확인 사살!
     if (eraser_size > 0) {
-        if (eraser_size % 2 == 0) eraser_size += 1; 
-        cv::Mat eraser_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(eraser_size, eraser_size));
         cv::morphologyEx(white_mask, white_mask, cv::MORPH_OPEN, eraser_kernel);
     }
 
@@ -229,8 +240,7 @@ private:
     cv::Mat lane_final;
     cv::bitwise_and(white_mask, roi, lane_final);
 
-    // ⭐ [NEW] 차선 연결을 위한 최종 팽창 (선생님 아이디어 적용!)
-    // 끊어진 차선을 이어주기 위해 3픽셀 두께로 살짝 뚱뚱하게 만듭니다.
+    // 최종 팽창 (끊어진 차선 잇기)
     int final_fat_size = 5; 
     cv::Mat final_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(final_fat_size, final_fat_size));
     cv::dilate(lane_final, lane_final, final_kernel);

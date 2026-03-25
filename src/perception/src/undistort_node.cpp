@@ -12,7 +12,7 @@ public:
     // 런치 파일에서 결정된 카메라 타입과 디바이스 경로를 받음
     declare_parameter<std::string>("camera_type", "HW40");
     declare_parameter<std::string>("device_path", "/dev/video6");
-    declare_parameter<int>("fps", 10);
+    declare_parameter<int>("fps", 30);
 
     std::string cam_type = get_parameter("camera_type").as_string();
     std::string dev_path = get_parameter("device_path").as_string();

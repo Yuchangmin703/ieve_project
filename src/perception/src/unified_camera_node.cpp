@@ -13,7 +13,7 @@ public:
   UnifiedCameraNode() : Node("unified_camera_node") {
     declare_parameter<std::string>("camera_type", "HW40");
     declare_parameter<std::string>("device_path", "/dev/video0");
-    declare_parameter<int>("fps", 15);
+    declare_parameter<int>("fps", 30);
 
     std::string cam_type = get_parameter("camera_type").as_string();
     std::string dev_path = get_parameter("device_path").as_string();
