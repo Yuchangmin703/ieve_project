@@ -44,6 +44,12 @@ source /opt/ros/humble/setup.zsh
 source install/setup.zsh
 ros2 run serial_bridge serial_node2
 ```
+### 💻 Terminal 7: Lidar Streaming
+```zsh
+source /opt/ros/humble/setup.zsh
+source install/setup.zsh
+ros2 run urg_node urg_node_driver --ros-args -p ip_address:=192.168.0.10
+```
 ---
 
 ## 📌 Pin Mapping
@@ -61,6 +67,127 @@ ros2 run serial_bridge serial_node2
 
 ---
 ## 💻 Source Code (ESP32 PID Control)
+
+실제로 들어갈 아두이노 코드입니다. 차가 직진으로 가도록 trim파라미터를 조정하세요.
+```cpp
+#include <ESP32Servo.h>
+
+const int SERVO_PIN = 18, ENCODER_A = 32, ENCODER_B = 33, PWM_PIN = 27, DIR_PIN = 26;
+const float WHEEL_DIAMETER_MM = 65.0, PI_VAL = 3.141592;
+const int PPR = 660;
+
+const float MAX_SPEED = 0.4;
+const int MAX_PWM = 100;
+const int MIN_PWM = 25;
+
+// ⭐ [수정 1] 직진 영점 조절을 위한 트림(Trim) 파라미터 추가 (단위: Degree)
+// 차가 오른쪽으로 쏠리면 이 값을 +2.0, +4.0 등으로 올려보고, 
+// 오히려 더 쏠리면 -2.0, -4.0 등 음수로 바꿔가며 완벽한 직진을 찾습니다.
+const float STEERING_TRIM_DEG = 3.0; 
+
+double targetV = 0.0, currentV = 0, lastCurrentV = 0;
+double Kp = 50.0, Ki = 20.0, Kd = 0.0, Kv = 100.0;
+float filterAlpha = 0.3;
+
+double error, cumError, dError;
+volatile long encoderTicks = 0;
+unsigned long lastTime = 0, lastPrintTime = 0;
+Servo steeringServo;
+
+void IRAM_ATTR readEncoder() {
+  if (digitalRead(ENCODER_A) == digitalRead(ENCODER_B)) encoderTicks--;
+  else encoderTicks++;
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial.setTimeout(2);
+  
+  pinMode(ENCODER_A, INPUT_PULLUP); pinMode(ENCODER_B, INPUT_PULLUP);
+  pinMode(PWM_PIN, OUTPUT); pinMode(DIR_PIN, OUTPUT);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_A), readEncoder, CHANGE);
+  
+  ESP32PWM::allocateTimer(0);
+  steeringServo.setPeriodHertz(50);
+  steeringServo.attach(SERVO_PIN, 500, 2400);
+  steeringServo.writeMicroseconds(1450);
+  lastTime = millis();
+}
+
+void loop() {
+  unsigned long currentTime = millis();
+  double dt = (currentTime - lastTime) / 1000.0;
+
+  if (dt >= 0.05) {
+    long ticks = encoderTicks; encoderTicks = 0;
+    
+    float rawV = (((float)ticks / PPR) * (WHEEL_DIAMETER_MM / 1000.0) * PI_VAL) / dt;
+    currentV = (filterAlpha * rawV) + ((1.0 - filterAlpha) * currentV);
+    error = targetV - currentV;
+    
+    if (abs(targetV) < 0.01 || abs(error) > 0.2) {
+      cumError = 0;
+    } else {
+      cumError += error * dt;
+      cumError = constrain(cumError, -0.5, 0.5);
+    }
+
+    double output = (Kv * targetV) + (Kp * error) + (Ki * cumError);
+
+    if (abs(targetV) < 0.01 && abs(currentV) < 0.03) {
+      analogWrite(PWM_PIN, 0);
+      cumError = 0;
+    } else {
+      int pwmOut = (int)abs(output);
+      if (pwmOut <= 3) {
+        analogWrite(PWM_PIN, 0);
+      } else {
+        pwmOut = constrain(pwmOut + MIN_PWM, MIN_PWM, MAX_PWM);
+        digitalWrite(DIR_PIN, (output >= 0) ? LOW : HIGH);
+        analogWrite(PWM_PIN, pwmOut);
+      }
+    }
+    lastCurrentV = currentV;
+    lastTime = currentTime;
+  }
+
+  if (currentTime - lastPrintTime >= 50) {
+    Serial.println(currentV);
+    lastPrintTime = currentTime;
+  }
+
+  // ⭐ 수신함(Buffer) 청소기 로직
+  if (Serial.available() > 0) {
+    String latestCmd = "";
+    
+    while (Serial.available() > 0) {
+      String temp = Serial.readStringUntil('\n');
+      temp.trim();
+      if (temp.length() > 0) {
+        latestCmd = temp;
+      }
+    }
+    
+    if (latestCmd.length() > 0 && !isalpha(latestCmd[0])) {
+      int commaIndex = latestCmd.indexOf(',');
+      if (commaIndex > 0) {
+        targetV = constrain(latestCmd.substring(0, commaIndex).toFloat(), -MAX_SPEED, MAX_SPEED);
+        
+        float steeringRad = latestCmd.substring(commaIndex + 1).toFloat();
+        
+        // ⭐ [수정 2] 기본 90도에 STEERING_TRIM_DEG(영점 오프셋)를 더해줍니다.
+        float servoAngleDeg = 90.0 - (steeringRad * 180.0 / PI_VAL) + STEERING_TRIM_DEG; 
+        
+        servoAngleDeg = constrain(servoAngleDeg, 65.0, 115.0);
+        
+        int pulseWidth = 500 + (int)((2400 - 500) * (servoAngleDeg / 180.0));
+        steeringServo.writeMicroseconds(pulseWidth);
+      }
+    }
+  }
+}
+```
+
 
 하드웨어 연결 확인용 (아두이노) 코드입니다. 
 시리얼창에 다음과 같이 입력해보세요. s45, s90, s135, 1.0 ,0.0, -1.0
