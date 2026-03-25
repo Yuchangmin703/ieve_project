@@ -39,15 +39,15 @@ public:
     // ----------------------------------------------------------
     // 4. 노이즈 사냥꾼 & 형태학적(Morphology) 필터 사이즈
     // ----------------------------------------------------------
-    declare_parameter<int>("tophat_size", 45);       
-    declare_parameter<int>("blast_size", 50);        
-    declare_parameter<int>("noise_eraser_size", 4);  
+    declare_parameter<int>("tophat_size", 20);       
+    declare_parameter<int>("blast_size", 25);        
+    declare_parameter<int>("noise_eraser_size", 3);  
     
     // ----------------------------------------------------------
     // 5. 팽창(Fat) 방어벽 & 잉크 확산(FloodFill) 세팅
     // ----------------------------------------------------------
-    declare_parameter<int>("yellow_fat_radius", 13); 
-    declare_parameter<int>("black_fat_radius", 20);  
+    declare_parameter<int>("yellow_fat_radius", 6); 
+    declare_parameter<int>("black_fat_radius", 10);  
     declare_parameter<int>("seed_row_from_bottom", 50); 
 
     // ----------------------------------------------------------

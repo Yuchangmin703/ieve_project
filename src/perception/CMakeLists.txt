@@ -10,8 +10,13 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
-find_package(OpenCV REQUIRED COMPONENTS core imgproc ximgproc)
+
+# ⭐ 수정 1: cv::VideoCapture 사용을 위해 OpenCV COMPONENTS에 'videoio' 추가!
+find_package(OpenCV REQUIRED COMPONENTS core imgproc ximgproc videoio)
 find_package(yaml-cpp REQUIRED)
+
+# ⭐ 수정 2: ament_index_cpp 패키지 추가!
+find_package(ament_index_cpp REQUIRED) 
 
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
@@ -31,6 +36,15 @@ add_executable(bev_warp_node src/bev_warp_node.cpp)
 ament_target_dependencies(bev_warp_node rclcpp sensor_msgs image_transport cv_bridge)
 target_link_libraries(bev_warp_node ${OpenCV_LIBRARIES} yaml-cpp)
 
+# ----------------------------------------------------
+# ⭐ [새로운 통합 슈퍼 노드 완벽 수정]
+# ----------------------------------------------------
+add_executable(unified_camera_node src/unified_camera_node.cpp)
+# yaml-cpp는 외부 라이브러리이므로 여기서 뺐습니다.
+ament_target_dependencies(unified_camera_node rclcpp sensor_msgs image_transport cv_bridge ament_index_cpp)
+# ⭐ 수정 3: OpenCV와 yaml-cpp를 전용 본드(target_link_libraries)로 강력하게 부착!
+target_link_libraries(unified_camera_node ${OpenCV_LIBRARIES} yaml-cpp)
+
 add_executable(lane_candidate_mask_node src/lane_candidate_mask_node.cpp)
 ament_target_dependencies(lane_candidate_mask_node rclcpp sensor_msgs geometry_msgs image_transport cv_bridge visualization_msgs)
 target_link_libraries(lane_candidate_mask_node ${OpenCV_LIBRARIES})
@@ -39,7 +53,6 @@ add_executable(centerline_extractor_node src/centerline_extractor_node.cpp)
 ament_target_dependencies(centerline_extractor_node rclcpp sensor_msgs geometry_msgs image_transport cv_bridge)
 target_link_libraries(centerline_extractor_node ${OpenCV_LIBRARIES} ${PROJECT_NAME}__rosidl_typesupport_cpp)
 
-# ⭐ 신규 추가: 시각화 노드
 add_executable(perception_viz_node src/perception_viz_node.cpp)
 ament_target_dependencies(perception_viz_node rclcpp sensor_msgs geometry_msgs visualization_msgs image_transport cv_bridge)
 target_link_libraries(perception_viz_node ${OpenCV_LIBRARIES} ${PROJECT_NAME}__rosidl_typesupport_cpp)
@@ -47,6 +60,7 @@ target_link_libraries(perception_viz_node ${OpenCV_LIBRARIES} ${PROJECT_NAME}__r
 install(TARGETS
   undistort_node
   bev_warp_node
+  unified_camera_node
   lane_candidate_mask_node
   centerline_extractor_node
   perception_viz_node

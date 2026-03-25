@@ -30,7 +30,7 @@ bev:
   output_height: 480
   
 metric:
-  meters_per_pixel_x: 0.001458
+  meters_per_pixel_x: 0.00229
   meters_per_pixel_y: 0.00142
 
   origin_u: 320.0

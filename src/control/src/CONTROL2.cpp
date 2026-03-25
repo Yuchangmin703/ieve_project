@@ -2,7 +2,7 @@
 #include <nav_msgs/msg/path.hpp>
 #include <std_msgs/msg/float32.hpp>
 #include <ackermann_msgs/msg/ackermann_drive_stamped.hpp>
-#include <visualization_msgs/msg/marker.hpp> // ⭐ 시각화 메시지 추가
+#include <visualization_msgs/msg/marker.hpp>
 #include <cmath>
 #include <algorithm>
 #include <chrono>
@@ -12,42 +12,43 @@ using namespace std;
 class ControlNode : public rclcpp::Node {
 public:
     ControlNode() : Node("control_node") {
-        // [차량 물리 파라미터]
+        // ==========================================
+        // ⚙️ 차량 제어 핵심 튜닝 패널 
+        // ==========================================
         wheelbase_ = 0.257;      
-        max_steer_ = 0.523598;   // 최대 30도 (라디안)
-       
-        // ⭐ [튜닝 포인트 1] 가변 시야 (Adaptive Lookahead)
-        lookahead_min_ = 1.0;   // 축거(0.257)와 비슷하게 설정하여 코너에서 타이트하게 추종
-        lookahead_max_ = 1.5;    // 직선에서는 1.5m까지 멀리 봐서 비틀거림 방지
-        lookahead_gain_ = 2.0;   // 반응속도 개선: 1.2→0.7 (0.4m/s 기준 0.56m, 코너 조기 감지)
-       
+        max_steer_ = 0.523598;   // 약 30.0도 (라디안)
+        
+        // ⭐ [NEW] 비선형 조향(S-Curve) 가중치 및 기준 각도 설정
+        // 튜닝 팁 1: 직진 시 떨면 expo_weight_를 올리세요 (예: 0.8). 코너에서 둔하면 내리세요 (예: 0.4).
+        expo_weight_ = 0.85;      
+        // 튜닝 팁 2: 이 각도보다 작으면 조향이 둔감해지고, 크면 팍 꺾입니다! (추천: 15.0 ~ 22.0)
+        crossover_deg_ = 20.0;   
+        
+        lookahead_min_ = 0.5;    
+        lookahead_max_ = 1.5;    
+        lookahead_gain_ = 0.7;   
         min_speed_ = 0.15;      
-        max_speed_ = 0.4;        // ⭐ 제어기의 절대 한계 속도
-       
+        max_speed_ = 0.5;        
+        // ==========================================
+        
         current_speed_ = 0.0;
         smoothed_steer_ = 0.0;
-        last_serial_pub_time_ = this->get_clock()->now();
-        last_path_time_ = this->get_clock()->now(); // 경로 타임아웃 감시용
+        last_path_time_ = this->get_clock()->now();
 
-        // 구독 및 발행
+        // 수신 큐 사이즈 1 (항상 최신 경로와 최신 속도만 확인)
         path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
-            "/planning/local_path", 10, bind(&ControlNode::path_callback, this, placeholders::_1));
-           
+            "/planning/local_path", 1, bind(&ControlNode::path_callback, this, placeholders::_1));
+            
         speed_sub_ = this->create_subscription<std_msgs::msg::Float32>(
-            "/ego_speed", 10, bind(&ControlNode::speed_callback, this, placeholders::_1));
-           
-        // 하드웨어로 나가는 Serial 토픽 (속도 제한 필요)
-        // 큐 크기 1: 오래된 명령이 DDS 레이어에 쌓여 burst 발행되는 것 방지
+            "/ego_speed", 1, bind(&ControlNode::speed_callback, this, placeholders::_1));
+            
+        // 발행 큐 사이즈 1
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>("/auto_drive", 1);
-       
-        // ⭐ [시각화 추가] 목표점 토픽
-        target_marker_pub_ = this->create_publisher<visualization_msgs::msg::Marker>("/planning/target_point", 10);
+        target_marker_pub_ = this->create_publisher<visualization_msgs::msg::Marker>("/planning/target_point", 1);
 
-        RCLCPP_INFO(this->get_logger(), "🚀 [Control] 시각화 및 Serial 부하 방지 로직 적용 완료!");
-
-        // 50Hz 고속 루프 타이머 (계산은 여전히 빠르게 함)
+        // 15Hz 제어 루프 (약 66ms 간격)
         timer_ = this->create_wall_timer(
-            chrono::milliseconds(20),
+            chrono::milliseconds(66),
             bind(&ControlNode::control_loop, this)
         );
     }
@@ -63,18 +64,12 @@ private:
     }
 
     void control_loop() {
-        // 경로 토픽이 0.5초 이상 오지 않으면 정지 명령 (C1: 토픽 타임아웃 watchdog)
         double path_age = (this->get_clock()->now() - last_path_time_).seconds();
-        if (path_age > 0.5) {
-            publish_throtte_drive(0.0, 0.0);
-            return;
-        }
-        if (latest_path_.poses.empty()) {
-            publish_throtte_drive(0.0, 0.0);
+        if (path_age > 0.5 || latest_path_.poses.empty()) {
+            publish_drive(0.0, 0.0);
             return;
         }
 
-        // 1. 다이나믹 시야 계산
         double dynamic_lookahead = lookahead_min_ + (lookahead_gain_ * abs(current_speed_));
         dynamic_lookahead = max(lookahead_min_, min(lookahead_max_, dynamic_lookahead));
 
@@ -83,130 +78,131 @@ private:
             double tx = latest_path_.poses[i].pose.position.x;
             double ty = latest_path_.poses[i].pose.position.y;
             double dist = hypot(tx, ty);
-           
+            
             if (dist >= dynamic_lookahead) {
                 target_idx = i;
                 break;
             }
         }
-       
+        
         if (target_idx == 0 && latest_path_.poses.size() > 1) {
             target_idx = latest_path_.poses.size() - 1;
         }
 
         double tx = latest_path_.poses[target_idx].pose.position.x;
         double ty = latest_path_.poses[target_idx].pose.position.y;
-       
-        // ==========================================================
-        // ⭐ [수정] 속도 채택 로직: Planning z값 vs 제어기 max_speed_ 중 Min 선택
-        // ==========================================================
+        
         double raw_target_v = latest_path_.poses[target_idx].pose.position.z;
-        // H3: NaN/Inf 속도가 플래닝에서 오면 0으로 대체
         if (!std::isfinite(raw_target_v)) raw_target_v = 0.0;
         double final_target_v = std::clamp(raw_target_v, -max_speed_, max_speed_);
 
-        // ⭐ [시각화 실행] RViz2에 목표점 발행
         publish_target_marker(tx, ty);
 
-        // 2. Pure Pursuit 기하학 조향각 계산
+        // 1. 순수 기하학적 조향각 계산 (Pure Pursuit)
         double alpha = atan2(ty, tx);
         double actual_Ld = hypot(tx, ty);
         double steer = 0.0;
-       
+        
         if (actual_Ld > 0.01) {
             steer = atan2(2.0 * wheelbase_ * sin(alpha), actual_Ld);
         }
+        
+        // 2. 하드웨어 물리적 한계로 클램핑 (±30도)
         steer = max(-max_steer_, min(max_steer_, steer));
 
-        // 조향 둔감대 (Soft Deadband) - 0.15→0.08 rad로 축소 (8.6°→4.6°)
-        // 너무 크면 작은 수정량도 잘라내서 오차가 누적됨
-        if (abs(steer) < 0.08) {
-            steer = steer * 0.5;
-        }
+        // ========================================================
+        // ⭐ [NEW] 사용자 맞춤형 커스텀 S-Curve 적용 (crossover_deg_ 기준)
+        // ========================================================
+        double norm_steer = steer / max_steer_; // -1.0 ~ 1.0 비율로 변환
 
-        // 3. 코너링 감속: smoothed_steer_ 대신 순간값 steer 사용
-        // [핵심 수정] smoothed_steer_(누적값) 사용 시 피드백 루프 발생:
-        //   누적 steer 큼 → 속도 감소 → lookahead 단축 → steer 더 커짐 → 루프 반복
+        // 최대 조향각을 도(Degree) 단위로 변환 후 기준점 비율(xc) 계산
+        double max_steer_deg = max_steer_ * (180.0 / M_PI);
+        double xc = crossover_deg_ / max_steer_deg;
+        
+        // 안전 장치: 변곡점이 너무 극단으로 가거나 0으로 나누는 오류 방지
+        xc = std::max(0.1, std::min(0.9, xc)); 
+
+        // 공식에 따른 수학적 계수 자동 산출
+        double A = (1.0 / xc) + 1.0;
+        double B = 1.0 - A;
+
+        // 커스텀 S-Curve 공식: y = A * x * |x| + B * x^3
+        double custom_s_curve = A * norm_steer * std::abs(norm_steer) + B * std::pow(norm_steer, 3.0);
+        
+        // 순정 선형 조향(1-k)과 S-Curve 조향(k)을 부드럽게 융합
+        double blended_norm = (1.0 - expo_weight_) * norm_steer + expo_weight_ * custom_s_curve;
+        
+        steer = blended_norm * max_steer_; // 다시 실제 라디안 단위로 복원
+        // ========================================================
+
+        // 4. 감속 로직 (코너링 시 속도 줄임)
         if (abs(final_target_v) > 0.01) {
             double cornering_factor = 1.0 - (abs(steer) / max_steer_) * 0.6;
             final_target_v = final_target_v * cornering_factor;
         }
 
-        // 조향 스무딩 필터 (cornering 계산 후 적용)
-        smoothed_steer_ = (0.75 * steer) + (0.25 * smoothed_steer_);
+        // 5. 반응성 향상을 위해 최신 조향값 90% 반영 (Low-pass Filter)
+        smoothed_steer_ = (0.9 * steer) + (0.1 * smoothed_steer_);
 
-        // 속도 하한 클리핑
+        // 6. 최소 속도 보장
         if (abs(final_target_v) > 0.01 && abs(final_target_v) < min_speed_) {
             final_target_v = (final_target_v > 0) ? min_speed_ : -min_speed_;
         } else if (abs(final_target_v) <= 0.01) {
             final_target_v = 0.0;
         }
 
-        // ⭐ [수정] Serial 부하를 방지하기 위해 속도가 제한된 발행 함수 호출
-        publish_throtte_drive(final_target_v, smoothed_steer_);
+        publish_drive(final_target_v, smoothed_steer_);
     }
 
-    // ⭐ [추가] Serial Serial 출력 주행 속도 제한 함수 (Serial Throttling)
-    void publish_throtte_drive(double v, double delta) {
-        rclcpp::Time now = this->get_clock()->now();
-        // 50Hz 타이머에 맞춰 20ms 간격으로 발행 (20ms → 50Hz, 반응속도 개선)
-        // serial_node2.py가 50Hz로 자체 rate-limit하므로 serial 과부하 없음
-        if ((now - last_serial_pub_time_).seconds() < 0.02) {
-            return;
-        }
-
+    void publish_drive(double v, double delta) {
         auto msg = ackermann_msgs::msg::AckermannDriveStamped();
-        msg.header.stamp = now;
+        msg.header.stamp = this->get_clock()->now();
         msg.drive.speed = (float)v;
         msg.drive.steering_angle = (float)delta;
         drive_pub_->publish(msg);
-       
-        last_serial_pub_time_ = now; // 발행 시간 업데이트
     }
 
-    // ⭐ [추가] RViz2 시각화 함수 (Red Point)
     void publish_target_marker(double x, double y) {
         visualization_msgs::msg::Marker marker;
-        marker.header.frame_id = "base_link"; // 차량 기준 좌표계
+        marker.header.frame_id = "base_link"; 
         marker.header.stamp = this->get_clock()->now();
         marker.ns = "target_point";
         marker.id = 0;
-        marker.type = visualization_msgs::msg::Marker::SPHERE; // 구체 모양
+        marker.type = visualization_msgs::msg::Marker::SPHERE; 
         marker.action = visualization_msgs::msg::Marker::ADD;
-       
-        // 목표점 위치
+        
         marker.pose.position.x = x;
         marker.pose.position.y = y;
         marker.pose.position.z = 0.0;
-       
-        // 크기 설정 (지름 10cm)
+        
         marker.scale.x = 0.1;
         marker.scale.y = 0.1;
         marker.scale.z = 0.1;
-       
-        // 색상 설정 (빨간색, 불투명)
+        
         marker.color.r = 1.0;
         marker.color.g = 0.0;
         marker.color.b = 0.0;
         marker.color.a = 1.0;
-       
+        
         target_marker_pub_->publish(marker);
     }
 
+    // 멤버 변수
     double wheelbase_, max_steer_;
+    double expo_weight_;    // ⭐ Expo 가중치
+    double crossover_deg_;  // ⭐ S-Curve 변곡점 (기준 각도)
     double lookahead_min_, lookahead_max_, lookahead_gain_;
     double min_speed_, max_speed_;
     double current_speed_;
     double smoothed_steer_;
-    rclcpp::Time last_serial_pub_time_;
-    rclcpp::Time last_path_time_; // 마지막 경로 수신 시간 (타임아웃 감시)
+    rclcpp::Time last_path_time_; 
 
     nav_msgs::msg::Path latest_path_;
 
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
     rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr speed_sub_;
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
-    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr target_marker_pub_; // ⭐ 시각화 퍼블리셔 추가
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr target_marker_pub_; 
     rclcpp::TimerBase::SharedPtr timer_;
 };
 

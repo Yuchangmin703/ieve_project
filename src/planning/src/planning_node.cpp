@@ -1,780 +1,432 @@
-#include <iostream>
-#include <cmath>
+#include <rclcpp/rclcpp.hpp>
+#include <nav_msgs/msg/path.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/pose_array.hpp> 
+#include <visualization_msgs/msg/marker.hpp>
 #include <vector>
-#include <iomanip>
-#include <algorithm>
+#include <cmath>
 #include <limits>
-#include <chrono>
+#include <iomanip> 
+#include <algorithm> 
 
-#include "rclcpp/rclcpp.hpp"
-#include "geometry_msgs/msg/pose_array.hpp"
-#include "geometry_msgs/msg/pose_stamped.hpp"
-#include "nav_msgs/msg/path.hpp"
-#include "std_msgs/msg/float32.hpp"
-#include "visualization_msgs/msg/marker.hpp"
-#include "visualization_msgs/msg/marker_array.hpp"
+#include "perception/msg/lanes.hpp" 
 
-#include "perception/msg/lanes.hpp"
+using namespace std;
 
-enum class BehaviorState { KEEP_LANE_CRUISE, LANE_CHANGE, EMERGENCY_BRAKE };
-enum class LaneDir { LEFT = -1, CENTER = 0, RIGHT = 1 };
-
-struct Obstacle {
-    double x; double y; double speed;
+struct Point2D {
+    float x;
+    float y;
+    bool visited;
 };
 
-struct VehicleInfo {
-    std::vector<geometry_msgs::msg::Point> left_line;
-    std::vector<geometry_msgs::msg::Point> ego_line;  
-    std::vector<geometry_msgs::msg::Point> right_line;
-   
-    std::vector<geometry_msgs::msg::Point> straight_ego_line;
-    std::vector<geometry_msgs::msg::Point> straight_left_line;  
-    std::vector<geometry_msgs::msg::Point> straight_right_line;
-
-    double lane_obs_dist[3];
-    double lane_obs_speed[3];
-    double lane_rear_obs_dist[3];
-    double lane_rear_obs_speed[3];
-
-    double ego_speed;    
-    bool   is_centered;  
-    std::vector<Obstacle> obstacles;
+struct TrackedObstacle {
+    int id;       
+    float x;      
+    float y;      
+    float speed;  
+    float yaw;    
 };
 
-struct DecisionResult {
-    BehaviorState state;        
-    LaneDir target_lane_dir;
-    double target_speed;
+// 🚗 차량의 현재 주행 상태
+enum DrivingState {
+    NORMAL,         // 평상시 카메라 차선 추종
+    AVOIDING,       // 인식된 차선 방향으로 강제 회피 기동
+    FOLLOWING,      // 모든 차선이 막혔을 때 앞차 추종 (대기)
+    EMERGENCY_STOP  // 1m 이내 장애물 감지 시 급정지
 };
 
-struct Tentacle {
-    double L_total;
-    bool collision;
-    double cost;    
-    std::vector<geometry_msgs::msg::PoseStamped> poses;
-};
-
-class DecisionMaker {
-private:
-    double current_target_v_ = 0.0;
-    int lc_lock_timer_ = 0;
-    int cooldown_timer_ = 0;
-    LaneDir committed_dir_ = LaneDir::CENTER;
-
+class RacePlannerNode : public rclcpp::Node {
 public:
-    void complete_lane_change() {
-        lc_lock_timer_ = 0;
-        cooldown_timer_ = 40;  
-        committed_dir_ = LaneDir::CENTER;
-    }
-
-    void cancel_lane_change() {
-        lc_lock_timer_ = 0;
-        cooldown_timer_ = 40;  
-        committed_dir_ = LaneDir::CENTER;
-    }
-
-   DecisionResult decide(const VehicleInfo& v) {
-        DecisionResult result;
-       
-        if (cooldown_timer_ > 0) cooldown_timer_--;
-
-        if (lc_lock_timer_ > 0) {
-            lc_lock_timer_--;
-        } else {
-            committed_dir_ = LaneDir::CENTER;
-        }
-
-        result.target_lane_dir = committed_dir_;
-        result.state = (lc_lock_timer_ > 0) ? BehaviorState::LANE_CHANGE : BehaviorState::KEEP_LANE_CRUISE;
-
-        int active_idx = (committed_dir_ == LaneDir::LEFT) ? 0 : ((committed_dir_ == LaneDir::RIGHT) ? 2 : 1);
-        double my_front_dist = v.lane_obs_dist[active_idx];
-        double my_front_speed = v.lane_obs_speed[active_idx];
-       
-        double MAX_CRUISE_SPEED = 0.4;
-        double raw_target_v = MAX_CRUISE_SPEED;
-       
-        if (my_front_dist < 2.5) {
-            double follow_margin = 0.6;
-            if (my_front_dist > follow_margin) {
-                raw_target_v = std::clamp(my_front_speed + (my_front_dist - follow_margin) * 0.6, 0.0, MAX_CRUISE_SPEED);
-            } else {
-                raw_target_v = my_front_speed * 0.8;
-            }
-        }
-
-        double rel_speed_front = v.ego_speed - my_front_speed;
-        double dynamic_trigger_dist = 1.2 + std::max(0.0, rel_speed_front) * 2.0;
-
-        if (v.is_centered && lc_lock_timer_ == 0 && cooldown_timer_ == 0 &&
-            my_front_dist < dynamic_trigger_dist && my_front_speed < MAX_CRUISE_SPEED * 0.9) {
-           
-            LaneDir best_dir = LaneDir::CENTER;
-            double my_score = my_front_dist + (my_front_speed * 3.0);
-            double best_score = my_score + 0.3;
-           
-            int check_indices[] = {0, 2};
-            LaneDir check_dirs[] = {LaneDir::LEFT, LaneDir::RIGHT};
-           
-            for (int i = 0; i < 2; ++i) {
-                int idx = check_indices[i];
-                if (idx == 0 && v.left_line.empty()) continue;
-                if (idx == 2 && v.right_line.empty()) continue;
-               
-                double target_front_x = v.lane_obs_dist[idx];
-                double target_rear_x = std::abs(v.lane_rear_obs_dist[idx]);
-               
-                double rel_speed_target_rear = v.lane_rear_obs_speed[idx] - v.ego_speed;
-                double dynamic_rear_margin = 0.3 + std::max(0.0, rel_speed_target_rear) * 1.5;
-
-                if (target_front_x < 0.8 || target_rear_x < dynamic_rear_margin) continue;
-
-                double score = target_front_x + (v.lane_obs_speed[idx] * 4.0);
-                if (score > best_score) {
-                    best_score = score;
-                    best_dir = check_dirs[i];
-                }
-            }
-
-            if (best_dir != LaneDir::CENTER) {
-                result.state = BehaviorState::LANE_CHANGE;
-                result.target_lane_dir = best_dir;
-                committed_dir_ = best_dir;
-                lc_lock_timer_ = 20; 
-            }
-        }
-
-        double rel_speed = v.ego_speed - my_front_speed;
-        double emergency_dist = 0.25;
-        if (my_front_dist < emergency_dist || ((rel_speed > 0.3) && ((my_front_dist / rel_speed) < 0.6))) {
-            result.state = BehaviorState::EMERGENCY_BRAKE;
-            raw_target_v = 0.0;
-        }
-
-        if (result.state == BehaviorState::EMERGENCY_BRAKE) {
-            current_target_v_ = 0.0;
-        } else {
-            double alpha = (raw_target_v < current_target_v_) ? 0.5 : 0.15;
-            current_target_v_ = (alpha * raw_target_v) + ((1.0 - alpha) * current_target_v_);
-        }
-
-        result.target_speed = current_target_v_;
-        return result;
-    }
-};
-
-class PlanningNode : public rclcpp::Node {
-private:
-    VehicleInfo myCar;
-    DecisionMaker brain;
-
-    rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr sub_objects_;
-    rclcpp::Subscription<perception::msg::Lanes>::SharedPtr sub_lanes_;
-    rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr sub_ego_speed_;
-   
-    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
-    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr viz_path_pub_;
-    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr candidates_pub_;
-   
-    rclcpp::TimerBase::SharedPtr timer_;
-    rclcpp::Time last_time_;
-
-    bool is_changing_lane_ = false;
-    double locked_total_L_ = 0.0;    
-    double locked_offset_ = 0.0;      
-    double driven_dist_ = 0.0;        
-    LaneDir active_change_dir_ = LaneDir::CENTER;
-
-    int left_miss_count_ = 0;
-    int right_miss_count_ = 0;
-    bool left_lane_exists_ = false;
-    bool right_lane_exists_ = false;
-
-    double smoothed_left_offset_ = 0.45;    
-    double smoothed_right_offset_ = -0.45;
-    double smoothed_yaw_offset_ = 0.0;
-
-    void reset_sensor_data() {
-        for(int i=0; i<3; i++) {
-            myCar.lane_obs_dist[i] = 30.0; myCar.lane_obs_speed[i] = 0.0;
-            myCar.lane_rear_obs_dist[i] = -30.0; myCar.lane_rear_obs_speed[i] = 0.0;
-        }
-        myCar.obstacles.clear();
-    }
-
-    void rotate_pt(double &x, double &y, double theta) {
-        double nx = x * std::cos(theta) - y * std::sin(theta);
-        double ny = x * std::sin(theta) + y * std::cos(theta);
-        x = nx; y = ny;
-    }
-
-    // =========================================================================
-    // [핵심: 직선/곡선 판별 필터 (Curvature Deadzone) 및 C1 연속 곡선 피팅]
-    // =========================================================================
-    double get_y_from_line(const std::vector<geometry_msgs::msg::Point>& line, double target_x) {
-        if (line.empty()) return 0.0;
+    RacePlannerNode() : Node("race_planner_node") {
         
-        // 1. 역방향 연장 (차량 범퍼 앞)
-        if (target_x < line.front().x) {
-            if (line.size() >= 5) {
-                double dx = line[4].x - line[0].x;
-                double dy = line[4].y - line[0].y;
-                if (std::abs(dx) > 0.05) {
-                    double slope = std::clamp(dy / dx, -0.3, 0.3);
-                    return line[0].y + slope * (target_x - line[0].x);
-                }
-            } else if (line.size() >= 2) {
-                double dx = line.back().x - line.front().x;
-                double dy = line.back().y - line.front().y;
-                if (std::abs(dx) > 1e-4) {
-                    double slope = std::clamp(dy / dx, -0.3, 0.3);
-                    return line.front().y + slope * (target_x - line.front().x);
-                }
-            }
-            return line.front().y;
-        }
+        // ==========================================
+        // 🛠️ [튜닝 파라미터 - 차선 간격 0.45m 스케일 맞춤]
+        // ==========================================
+        v_max_ = 0.4f; 
+        v_min_ = 0.2f; 
+
+        // 🟢 상태 1: 일반 경로 탐색 & 차선 분류 파라미터
+        max_search_radius_ = 0.4f; // 점과 점을 이을 최대 반경 (차선 간격보다 살짝 작게 설정)
         
-        // 2. 점과 점 사이 빈 공간 보간
-        for (size_t i = 0; i < line.size() - 1; ++i) {
-            if ((line[i].x <= target_x && line[i+1].x >= target_x) ||
-                (line[i].x >= target_x && line[i+1].x <= target_x)) {
-                double dx = line[i+1].x - line[i].x;
-                if (std::abs(dx) < 1e-6) return line[i].y;
-                return line[i].y + (target_x - line[i].x) / dx * (line[i+1].y - line[i].y);
-            }
-        }
+        // ⭐ 차선 분류 기준: 내 차선(0m)과 옆 차선(0.45m)을 가르는 임계값
+        my_lane_y_threshold_ = 0.25f; 
         
-        // 3. 차선 끝(허공) 예측 연장
-        int n = line.size();
-        if (n >= 3 && target_x > line.back().x) {
-            int idx1 = 0;
-            int idx2 = n / 2;
-            int idx3 = n - 1;
-            
-            double x1 = line[idx1].x, y1 = line[idx1].y;
-            double x2 = line[idx2].x, y2 = line[idx2].y;
-            double x3 = line[idx3].x, y3 = line[idx3].y;
-            
-            if ((x3 - x1) > 0.1) {
-                double dx1 = x1 - x3; double dy1 = y1 - y3;
-                double dx2 = x2 - x3; double dy2 = y2 - y3;
-                
-                double det = dx1 * dx2 * (dx1 - dx2);
-                if (std::abs(det) > 1e-6) {
-                    double a = (dy1 * dx2 - dy2 * dx1) / det;
-                    double b = (dx1 * dx1 * dy2 - dx2 * dx2 * dy1) / det;
-                    double c = y3;
-                    
-                    // [직선 필터링] 곡률(a)이 0.03 이하라면 직선으로 강제 변환
-                    if (std::abs(a) < 0.03) {
-                        a = 0.0; 
-                    } else {
-                        a = std::clamp(a, -0.6, 0.6); 
-                    }
-                    
-                    b = std::clamp(b, -0.5, 0.5);
-                    
-                    double target_dx = target_x - x3;
-                    return a * (target_dx * target_dx) + b * target_dx + c; 
-                }
-            }
-        }
+        lateral_search_limit_ = 0.2f; // 내 차선 시작점을 찾을 때 좌우 0.2m 내에서만 찾음
+        bubble_a_radius_ = 0.2f; // 버블 크기 (옆 차선까지 안 지워지도록 0.2m로 축소)
+        blockage_check_dist_ = 1.0f; 
+
+        // 🔴 상태 2: 회피 기동 파라미터
+        avoidance_time_sec_ = 1.0; 
+        avoidance_angle_deg_ = 25.0f; // 0.45m 이동에 맞게 회피 각도 축소 (45 -> 25도)
         
-        // 4. 점이 2개뿐이거나 곡선 계산 불가 시 (매끄러운 접선 연장)
-        if (n >= 2 && target_x > line.back().x) {
-            double x0 = line.back().x;
-            double y0 = line.back().y;
+        lidar_to_base_offset_x_ = 0.0;  
+        // ==========================================
 
-            double x_m = line.front().x;
-            double y_m = line.front().y;
-            for (int i = n - 2; i >= 0; --i) {
-                if (x0 - line[i].x >= 0.15) {
-                    x_m = line[i].x; y_m = line[i].y; break;
-                }
-            }
-            
-            double slope = 0.0;
-            double dx_m = x0 - x_m;
-            if (dx_m > 1e-4) {
-                slope = (y0 - y_m) / dx_m;
-                slope = std::clamp(slope, -0.4, 0.4);
-            }
+        current_state_ = NORMAL;
+        avoidance_direction_ = 1; 
 
-            double x_prev = line.front().x;
-            double y_prev = line.front().y;
-            bool found_prev = false;
-            for (int i = n - 2; i >= 0; --i) {
-                if (x0 - line[i].x >= 0.5) {
-                    x_prev = line[i].x; y_prev = line[i].y; found_prev = true; break;
-                }
-            }
-
-            double A = 0.0;
-            if (found_prev) {
-                double dx_prev = x_prev - x0; 
-                double dy_prev = y_prev - y0;
-                A = (dy_prev - slope * dx_prev) / (dx_prev * dx_prev);
-                
-                // [직선 필터링] 여기서도 곡률이 미미하면 완벽한 직선(A=0)으로 뻗음!
-                if (std::abs(A) < 0.03) {
-                    A = 0.0;
-                } else {
-                    A = std::clamp(A, -0.3, 0.3);
-                }
-            }
-
-            double dx = target_x - x0;
-            return y0 + slope * dx + A * dx * dx;
-        }
+        lanes_sub_ = this->create_subscription<perception::msg::Lanes>(
+            "/perception/lane/lanes", 10, 
+            std::bind(&RacePlannerNode::lanes_callback, this, std::placeholders::_1));
         
-        return line.empty() ? 0.0 : line.back().y;
-    }
-
-public:
-    PlanningNode() : Node("planning_node") {
-        myCar.ego_speed = 0.0;
-        myCar.is_centered = true;
-        last_time_ = this->get_clock()->now();
-        reset_sensor_data();
-
-        sub_objects_ = this->create_subscription<geometry_msgs::msg::PoseArray>(
-            "/perception/tracked_objects", 10, std::bind(&PlanningNode::objects_callback, this, std::placeholders::_1));
-        sub_lanes_ = this->create_subscription<perception::msg::Lanes>(
-            "/perception/lane/lanes", 10, std::bind(&PlanningNode::lanes_callback, this, std::placeholders::_1));
-        sub_ego_speed_ = this->create_subscription<std_msgs::msg::Float32>(
-            "/ego_speed", 10, [this](const std_msgs::msg::Float32::SharedPtr msg) { this->myCar.ego_speed = msg->data; });
+        obs_sub_ = this->create_subscription<geometry_msgs::msg::PoseArray>(
+            "/perception/tracked_objects", 10,
+            std::bind(&RacePlannerNode::obs_callback, this, std::placeholders::_1));
 
         path_pub_ = this->create_publisher<nav_msgs::msg::Path>("/planning/local_path", 10);
-        viz_path_pub_ = this->create_publisher<nav_msgs::msg::Path>("/planning/viz_path", 10);
-        candidates_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("/planning/candidate_paths", 10);
+        car_marker_pub_ = this->create_publisher<visualization_msgs::msg::Marker>("/planning/ego_car", 10);
+        path_vis_pub_ = this->create_publisher<visualization_msgs::msg::Marker>("/planning/path_vis", 10); 
+        speed_text_pub_ = this->create_publisher<visualization_msgs::msg::Marker>("/planning/speed_text", 10); 
 
-        timer_ = this->create_wall_timer(std::chrono::milliseconds(50), std::bind(&PlanningNode::timer_callback, this));
-            
-        RCLCPP_INFO(this->get_logger(), " Perfected Curvature Filtering & Throw-Catch Logic Active!");
+        RCLCPP_INFO(this->get_logger(), "🏁 [Planner] 0.45m 차선 폭 스케일 파라미터 적용 완료!");
     }
 
 private:
-    void lanes_callback(const perception::msg::Lanes::SharedPtr msg) {  
-        if (msg->lanes.empty()) {
-            myCar.is_centered = false;
-            left_lane_exists_ = false;
-            right_lane_exists_ = false;
-            return;
-        }
-
-        int best_idx = -1;
-        double min_y_abs = 999.0;
-        
-        // 1. 화면에서 내 차(base_link)와 가장 가까운 기준선 하나를 무조건 선택
-        for (size_t i = 0; i < msg->lanes.size(); ++i) {
-            if (msg->lanes[i].points.size() < 2) continue; 
-            double y_int = std::abs(get_y_from_line(msg->lanes[i].points, 0.5));
-            if (y_int < min_y_abs) {
-                min_y_abs = y_int;
-                best_idx = i;
-            }
-        }
-
-        if (best_idx != -1) {
-            myCar.is_centered = true;
-            
-            auto& base_line = msg->lanes[best_idx].points;
-            
-            // Yaw 보정
-            double raw_yaw = 0.0;
-            if (base_line.size() >= 3) {
-                int lookahead_idx = std::min(10, (int)base_line.size() - 1);
-                double dx = base_line[lookahead_idx].x - base_line[0].x;
-                double dy = base_line[lookahead_idx].y - base_line[0].y;
-                raw_yaw = std::atan2(dy, dx);
-            }
-            smoothed_yaw_offset_ = 0.05 * raw_yaw + 0.95 * smoothed_yaw_offset_;
-            
-            std::vector<geometry_msgs::msg::Point> straight_base;
-            for (auto pt : base_line) {
-                rotate_pt(pt.x, pt.y, -smoothed_yaw_offset_);
-                straight_base.push_back(pt);
-            }
-
-            double base_y_05 = get_y_from_line(straight_base, 0.5);
-            double base_y_12 = get_y_from_line(straight_base, 1.2);
-
-            std::vector<geometry_msgs::msg::Point> stitched_base;
-            std::vector<geometry_msgs::msg::Point> stitched_left;
-            std::vector<geometry_msgs::msg::Point> stitched_right;
-            
-            // 2. 조각 모음 및 나비 경로 생성을 위한 좌/우 차선 인식
-            for (size_t i = 0; i < msg->lanes.size(); ++i) {
-                if (msg->lanes[i].points.size() < 2) continue;
-                
-                std::vector<geometry_msgs::msg::Point> straight_cand;
-                for (auto pt : msg->lanes[i].points) {
-                    double nx = pt.x, ny = pt.y;
-                    rotate_pt(nx, ny, -smoothed_yaw_offset_);
-                    pt.x = nx; pt.y = ny;
-                    straight_cand.push_back(pt);
-                }
-                
-                double cand_y_05 = get_y_from_line(straight_cand, 0.5);
-                double cand_y_12 = get_y_from_line(straight_cand, 1.2);
-                
-                if (std::abs((cand_y_05 - base_y_05) - (cand_y_12 - base_y_12)) > 0.3) continue;
-                
-                double lat_dist = cand_y_05 - base_y_05;
-
-                if (std::abs(lat_dist) <= 0.25) {
-                    stitched_base.insert(stitched_base.end(), straight_cand.begin(), straight_cand.end());
-                } else if (lat_dist > 0.25 && lat_dist < 1.5) {
-                    stitched_left.insert(stitched_left.end(), straight_cand.begin(), straight_cand.end());
-                } else if (lat_dist < -0.25 && lat_dist > -1.5) {
-                    stitched_right.insert(stitched_right.end(), straight_cand.begin(), straight_cand.end());
-                }
-            }
-
-            auto sortByX = [](const geometry_msgs::msg::Point& a, const geometry_msgs::msg::Point& b){ return a.x < b.x; };
-            std::sort(stitched_base.begin(), stitched_base.end(), sortByX);
-            std::sort(stitched_left.begin(), stitched_left.end(), sortByX);
-            std::sort(stitched_right.begin(), stitched_right.end(), sortByX);
-
-            double final_y_05 = get_y_from_line(stitched_base, 0.5);
-            double shift_to_center = 0.0;
-            
-            // 3. 0.3m 엄격 필터링
-            const double MAX_MY_LANE_DIST = 0.30; 
-            const double LANE_HALF_WIDTH = 0.45; 
-
-            if (final_y_05 > 0.15 && final_y_05 <= MAX_MY_LANE_DIST) {
-                shift_to_center = -LANE_HALF_WIDTH; 
-            } else if (final_y_05 < -0.15 && final_y_05 >= -MAX_MY_LANE_DIST) {
-                shift_to_center = +LANE_HALF_WIDTH; 
-            } else {
-                // 내 차선이 아니면 추종하지 않고, 동적 평행 이동은 삭제
-                shift_to_center = -final_y_05; 
-            }
-
-            // 최종 가상의 중앙선 (ego_line) 연성
-            myCar.straight_ego_line.clear();
-            myCar.ego_line.clear();
-            for (double x = 0.0; x <= 2.5; x += 0.1) {
-                double base_y = get_y_from_line(stitched_base, x);
-                double center_y = base_y + shift_to_center; 
-                
-                geometry_msgs::msg::Point pt;
-                pt.x = x; pt.y = center_y; pt.z = 0.0;
-                myCar.straight_ego_line.push_back(pt);
-                
-                double raw_x = x, raw_y = center_y;
-                rotate_pt(raw_x, raw_y, smoothed_yaw_offset_);
-                geometry_msgs::msg::Point rpt;
-                rpt.x = raw_x; rpt.y = raw_y; rpt.z = 0.0;
-                myCar.ego_line.push_back(rpt);
-            }
-
-            // 4. 나비(Tentacle) 생성을 위해 좌/우 차선 인식 상태 업데이트
-            if (!stitched_left.empty()) {
-                myCar.straight_left_line = stitched_left;
-                smoothed_left_offset_ = 0.05 * (get_y_from_line(stitched_left, 0.5) - final_y_05) + 0.95 * smoothed_left_offset_;
-                left_miss_count_ = 0;
-                left_lane_exists_ = true;
-            } else {
-                left_miss_count_++;
-                if (left_miss_count_ > 3) left_lane_exists_ = false;
-            }
-
-            if (!stitched_right.empty()) {
-                myCar.straight_right_line = stitched_right;
-                smoothed_right_offset_ = 0.05 * (get_y_from_line(stitched_right, 0.5) - final_y_05) + 0.95 * smoothed_right_offset_;
-                right_miss_count_ = 0;
-                right_lane_exists_ = true;
-            } else {
-                right_miss_count_++;
-                if (right_miss_count_ > 3) right_lane_exists_ = false;
-            }
-
-        } else {
-            myCar.is_centered = false;
-        }
-    }
-
-    void objects_callback(const geometry_msgs::msg::PoseArray::SharedPtr msg) {
-        reset_sensor_data();
-        if (msg->poses.empty() || myCar.straight_ego_line.empty()) return;
-
+    void obs_callback(const geometry_msgs::msg::PoseArray::SharedPtr msg) {
+        obstacles_.clear();
         for (const auto& pose : msg->poses) {
-            double ox = pose.position.x, oy = pose.position.y, os = pose.position.z;
-            if (std::abs(ox) < 0.1 && std::abs(oy) < 0.2) continue;
-           
-            myCar.obstacles.push_back({ox, oy, os});
-           
-            double rot_ox = ox, rot_oy = oy;
-            rotate_pt(rot_ox, rot_oy, -smoothed_yaw_offset_);
-
-            double expected_y = get_y_from_line(myCar.straight_ego_line, rot_ox);
-            double lat_diff = rot_oy - expected_y;
-           
-            int obs_lane = -1;
-            if (std::abs(lat_diff) < 0.22) obs_lane = 1;
-            else if (lat_diff >= 0.22 && lat_diff < 0.80) obs_lane = 0;
-            else if (lat_diff <= -0.22 && lat_diff > -0.80) obs_lane = 2;
-
-            if (obs_lane != -1) {  
-                if (rot_ox >= -0.4 && rot_ox < myCar.lane_obs_dist[obs_lane]) {
-                    myCar.lane_obs_dist[obs_lane] = rot_ox;
-                    myCar.lane_obs_speed[obs_lane] = os;
-                }
-                if (rot_ox < -0.1 && rot_ox > myCar.lane_rear_obs_dist[obs_lane]) {
-                    myCar.lane_rear_obs_dist[obs_lane] = rot_ox;
-                    myCar.lane_rear_obs_speed[obs_lane] = os;
-                }
-            }
+            TrackedObstacle obs;
+            obs.x = pose.position.x + lidar_to_base_offset_x_;
+            obs.y = pose.position.y;
+            obstacles_.push_back(obs);
         }
     }
 
-    void timer_callback() {
-        auto now = this->get_clock()->now();
-        double dt = (now - last_time_).seconds();
-        if (dt > 0.2 || dt <= 0.0) dt = 0.1;
-        last_time_ = now;
+    void lanes_callback(const perception::msg::Lanes::SharedPtr msg) {
+        publish_car_marker();
 
-        DecisionResult decision = brain.decide(myCar);
-       
-        nav_msgs::msg::Path path_msg;
-        path_msg.header.frame_id = "base_link";
-        path_msg.header.stamp = now;
-
-        double max_visible_x = 2.0; 
-
-        if (myCar.straight_ego_line.empty()) {  
-            path_pub_->publish(path_msg);
-            viz_path_pub_->publish(path_msg);
-            return;
+        // ---------------------------------------------------------------------
+        // 🔴 STATE: AVOIDING (강제 회피 모드 중일 때)
+        // ---------------------------------------------------------------------
+        if (current_state_ == AVOIDING) {
+            double elapsed_time = (this->now() - avoidance_start_time_).seconds();
+            if (elapsed_time > avoidance_time_sec_) {
+                current_state_ = NORMAL;
+                RCLCPP_INFO(this->get_logger(), "🟢 회피 종료! 카메라 차선 추종으로 복귀합니다.");
+            } else {
+                publish_avoidance_path(msg->header.stamp);
+                publish_speed_text(v_min_);
+                return; 
+            }
+        } else {
+            current_state_ = NORMAL;
         }
 
-        if (is_changing_lane_) driven_dist_ += (myCar.ego_speed * dt);
-        else driven_dist_ = 0.0;  
+        // ---------------------------------------------------------------------
+        // 🟢 STATE: NORMAL (명시적 차선 분류 및 필터링)
+        // ---------------------------------------------------------------------
+        vector<Point2D> my_lane_points;
+        vector<Point2D> left_lane_points;
+        vector<Point2D> right_lane_points;
 
-        std::vector<Obstacle> straight_obstacles;
-        for (auto obs : myCar.obstacles) {
-            double ox = obs.x, oy = obs.y;
-            rotate_pt(ox, oy, -smoothed_yaw_offset_);
-            straight_obstacles.push_back({ox, oy, obs.speed});
-        }
+        // 1. 차선 덩어리(Array) 단위로 이름표 붙이기 및 버블 필터링
+        for (const auto& lane : msg->lanes) {
+            if (lane.points.empty()) continue;
 
-        std::vector<double> candidate_lengths = {0.7};
-        std::vector<Tentacle> left_tentacles, right_tentacles;  
+            // 뿌리 구역(X: 0~1.5m)의 평균 Y 좌표 계산
+            float sum_y = 0.0f;
+            int root_pt_count = 0;
+            for (const auto& pt : lane.points) {
+                if (pt.x > 0.0f && pt.x < 1.5f) {
+                    sum_y += pt.y;
+                    root_pt_count++;
+                }
+            }
 
-        auto generate_tentacles = [&](const std::vector<geometry_msgs::msg::Point>& target_line, double default_offset, std::vector<Tentacle>& out_tentacles) {  
-            for (double L : candidate_lengths) {
-                Tentacle t;
-                t.L_total = L;
-                t.collision = false;  
-               
-                for (double local_x = 0.0; local_x <= max_visible_x; local_x += 0.01) {
-                    double world_x = driven_dist_ + local_x;
-                    double progress = std::clamp(world_x / L, 0.0, 1.0);
-                    double dodge_blend = 0.5 * (1.0 - std::cos(progress * M_PI));
-                   
-                    double sy = get_y_from_line(myCar.straight_ego_line, local_x);
-                    double ty = sy + default_offset;
-                    if (!target_line.empty()) {
-                        ty = get_y_from_line(target_line, local_x);
-                    }
-                   
-                    double path_y = sy + (ty - sy) * dodge_blend;
-                   
-                    double ego_v = std::max(myCar.ego_speed, 0.1);
-                    double time_to_reach = local_x / ego_v;
+            float avg_y = (root_pt_count > 0) ? (sum_y / root_pt_count) : lane.points.front().y;
 
-                    for (const auto& obs : straight_obstacles) {
-                        double rel_v = obs.speed - myCar.ego_speed;
-                        double future_obs_x = obs.x + (rel_v * time_to_reach);
-
-                        if (future_obs_x > -0.5 && future_obs_x < max_visible_x) {
-                            if (std::hypot(future_obs_x - local_x, obs.y - path_y) < 0.20) {
-                                t.collision = true; break;
-                            }
+            // 점들을 버블로 필터링한 뒤, 이름표에 맞는 바구니에 담기
+            for (const auto& pt : lane.points) {
+                if (pt.x > 0.0f) {
+                    bool in_bubble = false;
+                    for (const auto& obs : obstacles_) { 
+                        if (hypot(pt.x - obs.x, pt.y - obs.y) < bubble_a_radius_) {
+                            in_bubble = true;
+                            break;
                         }
                     }
-
-                    double real_x = local_x;
-                    double real_y = path_y;
-                    rotate_pt(real_x, real_y, smoothed_yaw_offset_);
-
-                    geometry_msgs::msg::PoseStamped p;
-                    p.pose.position.x = real_x;
-                    p.pose.position.y = real_y;
-                    t.poses.push_back(p);  
+                    if (!in_bubble) {
+                        Point2D p = {(float)pt.x, (float)pt.y, false};
+                        
+                        // ⭐ 차선 폭 0.45m에 맞춘 칼같은 분류 (0.25m 기준)
+                        if (std::abs(avg_y) <= my_lane_y_threshold_) {
+                            my_lane_points.push_back(p);      // 내 차선
+                        } else if (avg_y > my_lane_y_threshold_) {
+                            left_lane_points.push_back(p);    // 좌측 차선
+                        } else {
+                            right_lane_points.push_back(p);   // 우측 차선
+                        }
+                    }
                 }
-                t.cost = std::abs(0.7 - L);
-                out_tentacles.push_back(t);  
             }
-        };
+        }
 
-        bool is_going_left = (is_changing_lane_ && active_change_dir_ == LaneDir::LEFT);
-        bool is_going_right = (is_changing_lane_ && active_change_dir_ == LaneDir::RIGHT);
+        // 2. 경로 단절 감지 (내 차선만 검사)
+        bool path_blocked = true;
+        for (const auto& pt : my_lane_points) {
+            if (pt.x > 0.0f && pt.x < blockage_check_dist_) {
+                path_blocked = false;
+                break;
+            }
+        }
+
+        // 3. 라이다 공간 로직 (내 차선 폭 안에 장애물이 있는지 검사)
+        float min_obs_x = numeric_limits<float>::max();
+        bool obstacle_in_my_lane = false;
+        // ⭐ 내 차선 폭 인식: 좌우 0.25m (총 0.5m 폭) 이내면 내 앞을 막았다고 판단
+        float my_lane_obs_width = 0.25f; 
+
+        for (const auto& obs : obstacles_) {
+            if (obs.x > 0.0f && std::abs(obs.y) < my_lane_obs_width) {
+                obstacle_in_my_lane = true;
+                if (obs.x < min_obs_x) {
+                    min_obs_x = obs.x; 
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // 🔴 상태 분기 (막힘 판단 시)
+        // ---------------------------------------------------------------------
+        if (path_blocked && obstacle_in_my_lane) {
+            
+            // [긴급 정지]
+            if (min_obs_x <= 1.0f) {
+                current_state_ = EMERGENCY_STOP;
+                RCLCPP_WARN(this->get_logger(), "🚨 1m 이내 장애물 도달! 급정지합니다.");
+                publish_straight_path(msg->header.stamp, 0.0f); 
+                publish_speed_text(0.0f);
+                return;
+            }
+
+            // [차선 변경 / 회피]
+            bool can_go_left = false;
+            for (const auto& pt : left_lane_points) if (pt.x < 2.0f) { can_go_left = true; break; }
+            
+            bool can_go_right = false;
+            for (const auto& pt : right_lane_points) if (pt.x < 2.0f) { can_go_right = true; break; }
+
+            if (can_go_left) {
+                current_state_ = AVOIDING;
+                avoidance_direction_ = 1; // 좌측(+25도)
+                avoidance_start_time_ = this->now();
+                RCLCPP_WARN(this->get_logger(), "🔴 좌측 차선 확인! 좌측으로 회피합니다.");
+                publish_avoidance_path(msg->header.stamp);
+                return;
+            } else if (can_go_right) {
+                current_state_ = AVOIDING;
+                avoidance_direction_ = -1; // 우측(-25도)
+                avoidance_start_time_ = this->now();
+                RCLCPP_WARN(this->get_logger(), "🔴 우측 차선 확인! 우측으로 회피합니다.");
+                publish_avoidance_path(msg->header.stamp);
+                return;
+            } else {
+                // [앞차 추종 대기]
+                current_state_ = FOLLOWING;
+                float target_speed = (min_obs_x > 2.0f) ? v_max_ : v_min_;
+                RCLCPP_INFO(this->get_logger(), "🚙 옆 차선 없음. 앞차 추종 중 (거리: %.2fm)", min_obs_x);
+                publish_straight_path(msg->header.stamp, target_speed);
+                publish_speed_text(target_speed);
+                return;
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // 🟢 정상 경로 생성 (오직 '내 차선' 점들만 사용!)
+        // ---------------------------------------------------------------------
+        if (my_lane_points.empty()) return;
+
+        // X축 오름차순 정렬
+        std::sort(my_lane_points.begin(), my_lane_points.end(), [](const Point2D& a, const Point2D& b) {
+            return a.x < b.x;
+        });
+
+        // 시작점 찾기 
+        int start_idx = -1;
+        float min_dist_to_origin = numeric_limits<float>::max();
+
+        for (size_t i = 0; i < my_lane_points.size(); ++i) {
+            float dist = hypot(my_lane_points[i].x, my_lane_points[i].y);
+            if (dist < min_dist_to_origin) {
+                min_dist_to_origin = dist;
+                start_idx = i;
+            }
+        }
+
+        if (start_idx == -1) return;
+
+        // Greedy 경로 연결
+        vector<Point2D> final_path;
+        my_lane_points[start_idx].visited = true;
+        final_path.push_back(my_lane_points[start_idx]);
         
-        bool keep_left = left_lane_exists_ || is_going_left;
-        bool keep_right = right_lane_exists_ || is_going_right;
+        Point2D current_point = my_lane_points[start_idx];
+        int current_search_start_idx = start_idx;
 
-        if (!is_changing_lane_) {
-            if (keep_left) generate_tentacles(myCar.straight_left_line, smoothed_left_offset_, left_tentacles);
-            if (keep_right) generate_tentacles(myCar.straight_right_line, smoothed_right_offset_, right_tentacles);  
-           
-            if (decision.target_lane_dir != LaneDir::CENTER) {
-                std::vector<Tentacle>* t_list = (decision.target_lane_dir == LaneDir::LEFT) ? &left_tentacles : &right_tentacles;
-                bool safe = false;
-                for (const auto& t : *t_list) {
-                    if (!t.collision) { safe = true; break; }
+        while (true) {
+            int next_idx = -1;
+            float min_dist = numeric_limits<float>::max();
+
+            for (size_t i = current_search_start_idx; i < my_lane_points.size(); ++i) {
+                if (my_lane_points[i].visited) continue;
+
+                if (my_lane_points[i].x - current_point.x > max_search_radius_) break; 
+
+                float dist = hypot(my_lane_points[i].x - current_point.x, my_lane_points[i].y - current_point.y);
+                if (dist < max_search_radius_ && dist < min_dist) {
+                    min_dist = dist;
+                    next_idx = i;
                 }
-
-                if (safe) {
-                    is_changing_lane_ = true;
-                    active_change_dir_ = decision.target_lane_dir;
-                    locked_total_L_ = 0.7; 
-                    locked_offset_ = (active_change_dir_ == LaneDir::LEFT) ? smoothed_left_offset_ : smoothed_right_offset_;
-                    driven_dist_ = 0.0;
-                } else {
-                    brain.cancel_lane_change();
-                }  
             }
+
+            if (next_idx == -1) break;
+
+            my_lane_points[next_idx].visited = true;
+            final_path.push_back(my_lane_points[next_idx]);
+            
+            current_point = my_lane_points[next_idx];
+            current_search_start_idx = next_idx + 1;
         }
 
-        std::vector<geometry_msgs::msg::PoseStamped> final_path_poses;  
+        // 발행
+        publish_path_visualization(final_path, v_min_, v_max_);
+        publish_speed_text(v_max_);
+        publish_path_msg(final_path, msg->header.stamp, v_max_);
+    }
 
-        if (is_changing_lane_) {
-            if (driven_dist_ < 0.2) {
-                // [동민님의 핵심 로직: 0.2m Blind Throw]
-                double navi_slope = (active_change_dir_ == LaneDir::LEFT) ? 0.6 : -0.6; 
-                for (double local_x = 0.0; local_x <= max_visible_x; local_x += 0.01) {
-                    double sy = get_y_from_line(myCar.straight_ego_line, local_x);
-                    double path_y = (local_x <= 0.2) ? sy + (navi_slope * local_x) : sy + (navi_slope * 0.2); 
-                    
-                    double real_x = local_x; double real_y = path_y;
-                    rotate_pt(real_x, real_y, smoothed_yaw_offset_);
-                    
-                    geometry_msgs::msg::PoseStamped p;
-                    p.pose.position.x = real_x; p.pose.position.y = real_y;
-                    final_path_poses.push_back(p);
-                }
-            } else {
-                // [동민님의 핵심 로직: Catch Phase - 평상시 ego_line으로 자연스럽게 복귀]
-                for (double x = 0.0; x <= max_visible_x; x += 0.01) {
-                    geometry_msgs::msg::PoseStamped p;
-                    p.pose.position.x = x; p.pose.position.y = get_y_from_line(myCar.ego_line, x);
-                    final_path_poses.push_back(p);  
-                }
-            }
-
-            if (driven_dist_ >= 0.3) {
-                is_changing_lane_ = false;          
-                active_change_dir_ = LaneDir::CENTER;
-                brain.complete_lane_change();       
-            }
-        } else {
-            // 평상시: 언제나 가장 튼튼하고 완벽한 ego_line을 추종
-            for (double x = 0.0; x <= max_visible_x; x += 0.01) {
-                geometry_msgs::msg::PoseStamped p;
-                p.pose.position.x = x; p.pose.position.y = get_y_from_line(myCar.ego_line, x);
-                final_path_poses.push_back(p);  
-            }
+    void publish_avoidance_path(const builtin_interfaces::msg::Time& stamp) {
+        vector<Point2D> avoid_path;
+        float angle_rad = avoidance_angle_deg_ * M_PI / 180.0f * avoidance_direction_;
+        for (float dist = 0.0f; dist <= 2.0f; dist += 0.1f) {
+            avoid_path.push_back({dist * std::cos(angle_rad), dist * std::sin(angle_rad), true});
         }
+        publish_path_visualization(avoid_path, v_min_, v_max_);
+        publish_path_msg(avoid_path, stamp, v_min_); 
+    }
 
-        visualization_msgs::msg::MarkerArray candidate_markers;  
-       
-        if (!is_changing_lane_) {
-            visualization_msgs::msg::Marker delete_frozen;
-            delete_frozen.header.frame_id = "base_link"; delete_frozen.header.stamp = now;
-            delete_frozen.ns = "frozen_path"; delete_frozen.id = 0;
-            delete_frozen.action = visualization_msgs::msg::Marker::DELETE;
-            candidate_markers.markers.push_back(delete_frozen);
-
-            // 나비(텐타클) 그리기
-            auto draw_unlocked_markers = [&](const std::vector<Tentacle>& t_list, const std::string& ns) {
-                for (size_t i = 0; i < candidate_lengths.size(); ++i) {
-                    visualization_msgs::msg::Marker m;
-                    m.header.frame_id = "base_link"; m.header.stamp = now;
-                    m.ns = ns; m.id = i;
-                    if (t_list.empty()) {
-                        m.action = visualization_msgs::msg::Marker::DELETE;
-                        candidate_markers.markers.push_back(m);
-                        continue;
-                    }
-                    m.type = visualization_msgs::msg::Marker::LINE_STRIP;
-                    m.action = visualization_msgs::msg::Marker::ADD;
-                    m.pose.orientation.w = 1.0;
-                    const Tentacle& t = t_list[i];
-                    for (const auto& p : t.poses) {
-                        geometry_msgs::msg::Point pt;
-                        pt.x = p.pose.position.x; pt.y = p.pose.position.y; pt.z = 0.0;
-                        m.points.push_back(pt);
-                    }
-                    m.scale.x = 0.04;
-                    if (t.collision) {
-                        m.color.r = 1.0; m.color.g = 0.0; m.color.b = 0.0; m.color.a = 0.6;
-                    } else {
-                        m.color.r = 0.0; m.color.g = 1.0; m.color.b = 1.0; m.color.a = 0.6;
-                    }
-                    candidate_markers.markers.push_back(m);
-                }
-            };
-            draw_unlocked_markers(left_tentacles, "tentacles_left");
-            draw_unlocked_markers(right_tentacles, "tentacles_right");
-        } else {
-            // 강제 조향 시에는 노란색 Throw 궤적 그리기
-            visualization_msgs::msg::Marker m;
-            m.header.frame_id = "base_link"; m.header.stamp = now;
-            m.ns = "frozen_path"; m.id = 0;
-            m.type = visualization_msgs::msg::Marker::LINE_STRIP;
-            m.action = visualization_msgs::msg::Marker::ADD;
-            m.pose.orientation.w = 1.0;
-            m.color.r = 1.0; m.color.g = 1.0; m.color.b = 0.0; m.color.a = 1.0;
-            m.scale.x = 0.12;
-           
-            for (const auto& p : final_path_poses) {
-                geometry_msgs::msg::Point pt;
-                pt.x = p.pose.position.x; pt.y = p.pose.position.y; pt.z = 0.0;
-                m.points.push_back(pt);
-            }
-            candidate_markers.markers.push_back(m);
+    void publish_straight_path(const builtin_interfaces::msg::Time& stamp, float speed) {
+        vector<Point2D> straight_path;
+        for (float dist = 0.0f; dist <= 2.0f; dist += 0.2f) {
+            straight_path.push_back({dist, 0.0f, true}); 
         }
-        candidates_pub_->publish(candidate_markers);  
-       
-        double final_dodge_speed = decision.target_speed;
+        publish_path_visualization(straight_path, v_min_, v_max_);
+        publish_path_msg(straight_path, stamp, speed);
+    }
 
-        for (size_t i = 0; i < final_path_poses.size(); ++i) {
-            final_path_poses[i].header = path_msg.header;
-            if (decision.state == BehaviorState::EMERGENCY_BRAKE) {
-                final_path_poses[i].pose.position.z = 0.0;
-            } else {
-                final_path_poses[i].pose.position.z = final_dodge_speed;
-            }
-           
-            if (i < final_path_poses.size() - 1) {
-                double dx = final_path_poses[i+1].pose.position.x - final_path_poses[i].pose.position.x;
-                double dy = final_path_poses[i+1].pose.position.y - final_path_poses[i].pose.position.y;
-                double yaw = std::atan2(dy, dx);
-                final_path_poses[i].pose.orientation.z = std::sin(yaw / 2.0);
-                final_path_poses[i].pose.orientation.w = std::cos(yaw / 2.0);
-            } else if (i > 0) {
-                final_path_poses[i].pose.orientation = final_path_poses[i-1].pose.orientation;
-            }
-            path_msg.poses.push_back(final_path_poses[i]);
+    void publish_path_msg(const vector<Point2D>& path_points, const builtin_interfaces::msg::Time& stamp, float speed) {
+        if (path_points.empty()) return;
+        
+        nav_msgs::msg::Path path_msg;
+        path_msg.header.stamp = stamp;
+        path_msg.header.frame_id = "base_link";
+
+        for (const auto& pt : path_points) {
+            geometry_msgs::msg::PoseStamped pose;
+            pose.header = path_msg.header;
+            pose.pose.position.x = pt.x;
+            pose.pose.position.y = pt.y;
+            pose.pose.position.z = speed; 
+            pose.pose.orientation.w = 1.0; 
+            path_msg.poses.push_back(pose);
         }
 
         path_pub_->publish(path_msg);
-       
-        nav_msgs::msg::Path viz_path = path_msg;
-        for (auto& p : viz_path.poses) p.pose.position.z = 0.0;
-        viz_path_pub_->publish(viz_path);
     }
+
+    void publish_speed_text(float speed) {
+        visualization_msgs::msg::Marker marker;
+        marker.header.frame_id = "base_link"; 
+        marker.header.stamp = this->now();
+        marker.ns = "speed_text";
+        marker.id = 0;
+        marker.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        marker.scale.z = 0.12; 
+        marker.color.r = 1.0f; marker.color.g = 1.0f; marker.color.b = 1.0f; marker.color.a = 1.0f; 
+        marker.pose.position.x = -0.6; marker.pose.position.y = 0.0; marker.pose.position.z = 0.1; 
+        marker.pose.orientation.w = 1.0;
+        
+        string state_str = "NORMAL";
+        if (current_state_ == AVOIDING) state_str = "AVOIDING";
+        else if (current_state_ == FOLLOWING) state_str = "FOLLOWING";
+        else if (current_state_ == EMERGENCY_STOP) state_str = "EMERG_STOP";
+
+        stringstream ss; ss << "Mode: " << state_str << "\nSpd: " << fixed << setprecision(2) << speed << "m/s";
+        marker.text = ss.str();
+        marker.lifetime = rclcpp::Duration::from_seconds(0.2); 
+        speed_text_pub_->publish(marker);
+    }
+
+    void publish_path_visualization(const vector<Point2D>& path, float v_min, float v_max) {
+        visualization_msgs::msg::Marker marker;
+        marker.header.frame_id = "base_link"; 
+        marker.header.stamp = this->now();
+        marker.ns = "path_vis";
+        marker.id = 0;
+        marker.type = visualization_msgs::msg::Marker::LINE_STRIP; 
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        marker.scale.x = 0.05; 
+        marker.pose.orientation.w = 1.0;
+
+        for (const auto& pt : path) {
+            geometry_msgs::msg::Point p;
+            p.x = pt.x; p.y = pt.y; p.z = 0.0;
+            marker.points.push_back(p);
+            
+            if (current_state_ == AVOIDING) {
+                marker.color.r = 1.0f; marker.color.g = 0.0f; marker.color.b = 0.0f; marker.color.a = 0.8f; 
+            } else if (current_state_ == EMERGENCY_STOP) {
+                marker.color.r = 1.0f; marker.color.g = 0.0f; marker.color.b = 1.0f; marker.color.a = 0.8f; 
+            } else if (current_state_ == FOLLOWING) {
+                marker.color.r = 1.0f; marker.color.g = 0.5f; marker.color.b = 0.0f; marker.color.a = 0.8f; 
+            } else {
+                marker.color.r = 0.0f; marker.color.g = 1.0f; marker.color.b = 0.0f; marker.color.a = 0.6f; 
+            }
+        }
+        marker.lifetime = rclcpp::Duration::from_seconds(0.2); 
+        path_vis_pub_->publish(marker);
+    }
+
+    void publish_car_marker() {
+        visualization_msgs::msg::Marker marker;
+        marker.header.frame_id = "base_link"; 
+        marker.header.stamp = this->now();
+        marker.ns = "ego_car";
+        marker.id = 0;
+        marker.type = visualization_msgs::msg::Marker::CUBE; 
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        marker.scale.x = 0.4; marker.scale.y = 0.2; marker.scale.z = 0.25;
+        marker.color.r = 0.1f; marker.color.g = 0.5f; marker.color.b = 1.0f; marker.color.a = 0.7f; 
+        marker.pose.position.x = -0.2; marker.pose.position.y = 0.0; marker.pose.position.z = 0.125; 
+        marker.pose.orientation.w = 1.0;
+        car_marker_pub_->publish(marker);
+    }
+
+    rclcpp::Subscription<perception::msg::Lanes>::SharedPtr lanes_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr obs_sub_; 
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr car_marker_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr path_vis_pub_; 
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr speed_text_pub_; 
+    
+    std::vector<TrackedObstacle> obstacles_; 
+    
+    DrivingState current_state_;
+    rclcpp::Time avoidance_start_time_;
+    int avoidance_direction_;
+
+    float v_max_, v_min_;
+    float max_search_radius_;
+    float my_lane_y_threshold_;
+    float bubble_a_radius_, lateral_search_limit_, blockage_check_dist_;
+    double avoidance_time_sec_;
+    float avoidance_angle_deg_;
+    float lidar_to_base_offset_x_; 
 };
 
-int main(int argc, char **argv) {
+int main(int argc, char ** argv) {
     rclcpp::init(argc, argv);
-    auto node = std::make_shared<PlanningNode>();
-    rclcpp::spin(node);
+    rclcpp::spin(make_shared<RacePlannerNode>());
     rclcpp::shutdown();
     return 0;
 }

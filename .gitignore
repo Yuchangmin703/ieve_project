@@ -4,3 +4,6 @@ log/
 .vscode/
 *.log
 
+Downloads/
+*.deb
+*.zip
