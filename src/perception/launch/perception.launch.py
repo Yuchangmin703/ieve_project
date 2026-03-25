@@ -123,13 +123,13 @@ def generate_launch_description():
                     {'publish_debug': LaunchConfiguration('publish_debug')},
                     
                     # 1. 흰색 (White) 파라미터
-                    {'strict_white_v_min': 101},
-                    {'loose_white_v_min': 100},
-                    {'white_s_max': 35},
+                    {'strict_white_v_min': 105},
+                    {'loose_white_v_min': 90},
+                    {'white_s_max': 25},
                     
                     # 2. 검은 도로 (Black) 파라미터
                     {'black_v_min': 0},
-                    {'black_v_max': 130},
+                    {'black_v_max': 125},
                     
                     # 3. 노란색 차선 (Yellow) 파라미터
                     {'yellow_h_min': 20},
@@ -140,13 +140,13 @@ def generate_launch_description():
                     {'yellow_v_max': 255},
                     
                     # 4. 노이즈 사냥꾼 & 형태학적(Morphology) 커널 사이즈
-                    {'tophat_size': 28},
-                    {'blast_size': 30},
-                    {'noise_eraser_size': 4},
+                    {'tophat_size': 20},
+                    {'blast_size': 25},
+                    {'noise_eraser_size': 3},
                     
                     # 5. 팽창(Fat) 방어벽 세팅
                     {'yellow_fat_radius': 6},
-                    {'black_fat_radius': 14},
+                    {'black_fat_radius': 10},
                     {'seed_row_from_bottom': 50}
                 ] + global_bev_params  # ⭐ C++ 노드의 BEV 물리적 거리 연동!
             ),

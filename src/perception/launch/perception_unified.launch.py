@@ -85,19 +85,39 @@ def generate_launch_description():
             ),
             # 마스크 노드
             Node(
-                package='perception',
-                executable='lane_candidate_mask_node',
-                name='lane_candidate_mask_node',
-                output='screen',
-                parameters=[
-                    {'publish_debug': LaunchConfiguration('publish_debug')},
-                    {'strict_white_v_min': 102}, {'loose_white_v_min': 95}, {'white_s_max': 25},
-                    {'black_v_min': 0}, {'black_v_max': 125},
-                    {'yellow_h_min': 20}, {'yellow_h_max': 35}, {'yellow_s_min': 75}, {'yellow_s_max': 180}, {'yellow_v_min': 145}, {'yellow_v_max': 255},
-                    {'tophat_size': 20}, {'blast_size': 25}, {'noise_eraser_size': 3},
-                    {'yellow_fat_radius': 8}, {'black_fat_radius': 10}, {'seed_row_from_bottom': 50}
-                ] + global_bev_params
-            ),
+		    package='perception',
+		    executable='lane_candidate_mask_node',
+		    name='lane_candidate_mask_node',
+		    output='screen',
+		    parameters=[
+			{'publish_debug': LaunchConfiguration('publish_debug')},
+
+			{'proc_width': 320},
+			{'proc_height': 240},
+
+			{'strict_white_v_min': 105},
+			{'loose_white_v_min': 90},
+			{'white_s_max': 25},
+
+			{'black_v_min': 0},
+			{'black_v_max': 125},
+
+			{'yellow_h_min': 20},
+			{'yellow_h_max': 35},
+			{'yellow_s_min': 70},
+			{'yellow_s_max': 180},
+			{'yellow_v_min': 145},
+			{'yellow_v_max': 255},
+
+			{'tophat_size': 10},
+			{'blast_size': 12},
+			{'noise_eraser_size': 3},
+
+			{'yellow_fat_radius': 3},
+			{'black_fat_radius': 5},
+			{'seed_row_from_bottom': 25},
+		    ] + global_bev_params
+		),
             # 중심선 추출 노드
             Node(
                 package='perception',
