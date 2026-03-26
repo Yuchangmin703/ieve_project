@@ -35,8 +35,8 @@ private:
 
         // ⭐ 수정: 최대 출력을 0.4m/s로 매핑하여 미세 조종 가능하도록 함
         ackermann_msgs::msg::AckermannDriveStamped drive_msg;
-        drive_msg.drive.speed = msg->axes[1] * 0.4;   
-        drive_msg.drive.steering_angle = msg->axes[3] * 0.4;
+        drive_msg.drive.speed = msg->axes[1] * 1.0;   
+        drive_msg.drive.steering_angle = msg->axes[3] * 1.0;
         drive_pub_->publish(drive_msg);
     }
 };
