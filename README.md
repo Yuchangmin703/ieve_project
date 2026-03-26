@@ -6,7 +6,7 @@
 ```zsh
 source /opt/ros/humble/setup.zsh
 source install/setup.zsh
-ros2 launch perception perception.launch.py
+ros2 launch perception perception_unified.launch.py
 ```
 
 ### 💻 Terminal 2: LiDAR Perception Node
