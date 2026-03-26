@@ -13,31 +13,31 @@ class ControlNode : public rclcpp::Node {
 public:
     ControlNode() : Node("control_node") {
         // ==========================================
-        // ⚙️ 차량 제어 핵심 튜닝 패널 
+        // ⚙️ 차량 제어 핵심 튜닝 패널
         // ==========================================
-        wheelbase_ = 0.257;      
+        wheelbase_ = 0.257;
         max_steer_ = 0.523598;   // 약 30.0도 (라디안)
-        
+
         // ⭐ [수정] 타원형 시야 비율 (0.80: 더 뭉툭하고 원형에 가까운 타원)
-        lateral_ratio_ = 0.80;   
-        
-        lookahead_min_ = 0.7;    
-        lookahead_max_ = 1.5;    
-        lookahead_gain_ = 0.7;   
+        lateral_ratio_ = 0.80;
+
+        lookahead_min_ = 0.7;
+        lookahead_max_ = 1.5;
+        lookahead_gain_ = 0.7;
         min_speed_ = 0.5;
-        max_speed_ = 1.5;        
+        max_speed_ = 1.5;
         // ==========================================
-        
+
         current_speed_ = 0.0;
         smoothed_steer_ = 0.0;
         last_path_time_ = this->get_clock()->now();
 
         path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
             "/planning/local_path", 1, bind(&ControlNode::path_callback, this, placeholders::_1));
-            
+
         speed_sub_ = this->create_subscription<std_msgs::msg::Float32>(
             "/ego_speed", 1, bind(&ControlNode::speed_callback, this, placeholders::_1));
-            
+
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>("/auto_drive", 1);
         target_marker_pub_ = this->create_publisher<visualization_msgs::msg::Marker>("/planning/target_point", 1);
 
@@ -77,23 +77,23 @@ private:
         for (size_t i = 0; i < latest_path_.poses.size(); ++i) {
             double tx = latest_path_.poses[i].pose.position.x;
             double ty = latest_path_.poses[i].pose.position.y;
-            
+
             // 타원 방정식 적용
             double ellipse_val = (tx * tx) / (a * a) + (ty * ty) / (b * b);
-            
+
             if (ellipse_val >= 1.0) {
                 target_idx = i;
                 break;
             }
         }
-        
+
         if (target_idx == 0 && latest_path_.poses.size() > 1) {
             target_idx = latest_path_.poses.size() - 1;
         }
 
         double tx = latest_path_.poses[target_idx].pose.position.x;
         double ty = latest_path_.poses[target_idx].pose.position.y;
-        
+
         double raw_target_v = latest_path_.poses[target_idx].pose.position.z;
         if (!std::isfinite(raw_target_v)) raw_target_v = 0.0;
         double final_target_v = std::clamp(raw_target_v, -max_speed_, max_speed_);
@@ -104,15 +104,13 @@ private:
         double alpha = atan2(ty, tx);
         double actual_Ld = hypot(tx, ty);
         double steer = 0.0;
-        
+
         if (actual_Ld > 0.01) {
             steer = atan2(2.0 * wheelbase_ * sin(alpha), actual_Ld);
         }
-        
+
         // 2. 물리적 한계 클램핑
         steer = max(-max_steer_, min(max_steer_, steer));
-
-        // ⭐ [수정] S-Curve 연산을 제거하고 곧바로 감속 및 필터 적용
 
         // 3. 감속 로직 (코너링 시 속도 줄임)
         if (abs(final_target_v) > 0.01) {
@@ -148,11 +146,11 @@ private:
 
     void publish_target_marker(double x, double y) {
         visualization_msgs::msg::Marker marker;
-        marker.header.frame_id = "base_link"; 
+        marker.header.frame_id = "base_link";
         marker.header.stamp = this->get_clock()->now();
         marker.ns = "target_point";
         marker.id = 0;
-        marker.type = visualization_msgs::msg::Marker::SPHERE; 
+        marker.type = visualization_msgs::msg::Marker::SPHERE;
         marker.action = visualization_msgs::msg::Marker::ADD;
         marker.pose.position.x = x;
         marker.pose.position.y = y;
@@ -168,12 +166,12 @@ private:
     double min_speed_, max_speed_;
     double current_speed_;
     double smoothed_steer_;
-    rclcpp::Time last_path_time_; 
+    rclcpp::Time last_path_time_;
     nav_msgs::msg::Path latest_path_;
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
     rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr speed_sub_;
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
-    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr target_marker_pub_; 
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr target_marker_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
 };
 

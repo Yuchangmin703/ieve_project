@@ -6,7 +6,7 @@
 ```zsh
 source /opt/ros/humble/setup.zsh
 source install/setup.zsh
-ros2 launch perception perception.launch.py
+ros2 launch perception perception_unified.launch.py
 ```
 
 ### 💻 Terminal 2: LiDAR Perception Node
@@ -34,7 +34,7 @@ ros2 run control control_node2
 ```zsh
 source /opt/ros/humble/setup.zsh
 source install/setup.zsh
-ros2 run joy joy_node & ros2 run control joy_drive_node & ros2 run control drive_mux_node
+ros2 launch control control.launch.py
 ```
 
 ### 💻 Terminal 6: Serial Bridge (ESP32)
