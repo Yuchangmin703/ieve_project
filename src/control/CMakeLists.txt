@@ -36,12 +36,18 @@ add_executable(joy_drive_node src/joy_drive_node.cpp)
 ament_target_dependencies(joy_drive_node
   rclcpp sensor_msgs ackermann_msgs std_msgs)
 
-# 설치
+# 🔹 실행 파일 설치
 install(TARGETS 
   control_node 
   control_node2
   drive_mux_node
   joy_drive_node
   DESTINATION lib/${PROJECT_NAME})
+
+# ⭐ [NEW] Launch 파일 폴더 설치
+install(DIRECTORY
+  launch
+  DESTINATION share/${PROJECT_NAME}
+)
 
 ament_package()
