@@ -65,13 +65,14 @@ def generate_launch_description():
 
     use_viz_arg = DeclareLaunchArgument('use_viz', default_value='true', description='Enable perception visualization node')
     debug_arg = DeclareLaunchArgument('publish_debug', default_value='true', description='Enable intermediate debug image publishing')
+    
+    use_fake_arg = DeclareLaunchArgument('use_fake', default_value='false', description='Enable fake image sequence mode')
 
     camera_setup = ExecuteProcess(cmd=['bash', script_path], output='screen')
 
     nodes_to_start = TimerAction(
         period=2.0,
         actions=[
-            # ⭐ 통합된 새 노드 하나만 실행!
             Node(
                 package='perception',
                 executable='unified_camera_node',
@@ -80,10 +81,10 @@ def generate_launch_description():
                 parameters=[
                     {'device_path': dev_path},
                     {'camera_type': cam_type},
-                    {'fps': 30}
+                    {'fps': 30},
+                    {'use_fake': LaunchConfiguration('use_fake')}
                 ]
             ),
-            # 마스크 노드
             Node(
                 package='perception',
                 executable='lane_candidate_mask_node',
@@ -91,14 +92,22 @@ def generate_launch_description():
                 output='screen',
                 parameters=[
                     {'publish_debug': LaunchConfiguration('publish_debug')},
-                    {'strict_white_v_min': 102}, {'loose_white_v_min': 95}, {'white_s_max': 25},
-                    {'black_v_min': 0}, {'black_v_max': 125},
+                    {'strict_white_v_min': 95}, {'loose_white_v_min': 95}, {'white_s_max': 30},
+                    
+                    {'sobel_thresh': 220}, {'sobel_dilate_size': 11},
+                    
+                    {'black_v_min': 0}, {'black_v_max': 135},
                     {'yellow_h_min': 20}, {'yellow_h_max': 35}, {'yellow_s_min': 75}, {'yellow_s_max': 180}, {'yellow_v_min': 145}, {'yellow_v_max': 255},
-                    {'tophat_size': 20}, {'blast_size': 25}, {'noise_eraser_size': 3},
-                    {'yellow_fat_radius': 8}, {'black_fat_radius': 10}, {'seed_row_from_bottom': 50}
+                    {'tophat_size': 27}, {'blast_size': 30}, {'noise_eraser_size': 5},
+                    
+                    {'yellow_fat_x': 8}, {'yellow_fat_y': 20}, 
+                    
+                    # ⭐ [NEW] 노란색 벽을 위로 끝까지 올릴지 결정하는 스위치!
+                    {'extend_yellow_top': True},
+                    
+                    {'black_fat_radius': 10}, {'seed_row_from_bottom': 25}
                 ] + global_bev_params
             ),
-            # 중심선 추출 노드
             Node(
                 package='perception',
                 executable='centerline_extractor_node',
@@ -109,7 +118,6 @@ def generate_launch_description():
                     {'frame_id': 'base_link'}, {'y_thresh': 0.25}, {'x_thresh': 0.60}, {'min_lane_pts': 15}
                 ] + global_res_params + global_metric_params
             ),
-            # 시각화 노드
             Node(
                 package='perception',
                 executable='perception_viz_node',
@@ -121,4 +129,4 @@ def generate_launch_description():
         ]
     )
 
-    return LaunchDescription([use_viz_arg, debug_arg, camera_setup, nodes_to_start])
+    return LaunchDescription([use_viz_arg, debug_arg, use_fake_arg, camera_setup, nodes_to_start])

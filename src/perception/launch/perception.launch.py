@@ -123,9 +123,9 @@ def generate_launch_description():
                     {'publish_debug': LaunchConfiguration('publish_debug')},
                     
                     # 1. 흰색 (White) 파라미터
-                    {'strict_white_v_min': 101},
+                    {'strict_white_v_min': 90},
                     {'loose_white_v_min': 100},
-                    {'white_s_max': 35},
+                    {'white_s_max': 45},
                     
                     # 2. 검은 도로 (Black) 파라미터
                     {'black_v_min': 0},
