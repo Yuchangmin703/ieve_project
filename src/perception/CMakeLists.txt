@@ -20,7 +20,7 @@ find_package(ament_index_cpp REQUIRED)
 
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
-find_package(visualization_msgs REQUIRED)
+
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Lane.msg"
@@ -28,25 +28,12 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   DEPENDENCIES geometry_msgs std_msgs
 )
 
-add_executable(undistort_node src/undistort_node.cpp)
-ament_target_dependencies(undistort_node rclcpp sensor_msgs image_transport cv_bridge)
-target_link_libraries(undistort_node ${OpenCV_LIBRARIES} yaml-cpp)
-
-add_executable(bev_warp_node src/bev_warp_node.cpp)
-ament_target_dependencies(bev_warp_node rclcpp sensor_msgs image_transport cv_bridge)
-target_link_libraries(bev_warp_node ${OpenCV_LIBRARIES} yaml-cpp)
-
-# ----------------------------------------------------
-# ⭐ [새로운 통합 슈퍼 노드 완벽 수정]
-# ----------------------------------------------------
 add_executable(unified_camera_node src/unified_camera_node.cpp)
-# yaml-cpp는 외부 라이브러리이므로 여기서 뺐습니다.
 ament_target_dependencies(unified_camera_node rclcpp sensor_msgs image_transport cv_bridge ament_index_cpp)
-# ⭐ 수정 3: OpenCV와 yaml-cpp를 전용 본드(target_link_libraries)로 강력하게 부착!
 target_link_libraries(unified_camera_node ${OpenCV_LIBRARIES} yaml-cpp)
 
 add_executable(lane_candidate_mask_node src/lane_candidate_mask_node.cpp)
-ament_target_dependencies(lane_candidate_mask_node rclcpp sensor_msgs geometry_msgs image_transport cv_bridge visualization_msgs)
+ament_target_dependencies(lane_candidate_mask_node rclcpp sensor_msgs image_transport cv_bridge)
 target_link_libraries(lane_candidate_mask_node ${OpenCV_LIBRARIES})
 
 add_executable(centerline_extractor_node src/centerline_extractor_node.cpp)
@@ -54,12 +41,10 @@ ament_target_dependencies(centerline_extractor_node rclcpp sensor_msgs geometry_
 target_link_libraries(centerline_extractor_node ${OpenCV_LIBRARIES} ${PROJECT_NAME}__rosidl_typesupport_cpp)
 
 add_executable(perception_viz_node src/perception_viz_node.cpp)
-ament_target_dependencies(perception_viz_node rclcpp sensor_msgs geometry_msgs visualization_msgs image_transport cv_bridge)
-target_link_libraries(perception_viz_node ${OpenCV_LIBRARIES} ${PROJECT_NAME}__rosidl_typesupport_cpp)
+ament_target_dependencies(perception_viz_node rclcpp sensor_msgs)
+target_link_libraries(perception_viz_node ${PROJECT_NAME}__rosidl_typesupport_cpp)
 
 install(TARGETS
-  undistort_node
-  bev_warp_node
   unified_camera_node
   lane_candidate_mask_node
   centerline_extractor_node

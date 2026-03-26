@@ -32,7 +32,6 @@ def generate_launch_description():
 
     bev_cfg = config_data['bev']
     metric_cfg = config_data['metric']
-    viz_metric_cfg = config_data['viz_metric']
 
     global_bev_params = [
         {'bev_x_min': float(bev_cfg['x_min'])},
@@ -56,16 +55,7 @@ def generate_launch_description():
         {'camera_to_base_x_m': float(metric_cfg['camera_to_base_x_m'])},
         {'camera_to_base_y_m': float(metric_cfg['camera_to_base_y_m'])},
     ]
-    global_viz_metric_params = [
-        {'viz_x_min': float(viz_metric_cfg['x_min'])},
-        {'viz_x_max': float(viz_metric_cfg['x_max'])},
-        {'viz_y_min': float(viz_metric_cfg['y_min'])},
-        {'viz_y_max': float(viz_metric_cfg['y_max'])},
-    ]
-
     use_viz_arg = DeclareLaunchArgument('use_viz', default_value='true', description='Enable perception visualization node')
-    debug_arg = DeclareLaunchArgument('publish_debug', default_value='true', description='Enable intermediate debug image publishing')
-    
     use_fake_arg = DeclareLaunchArgument('use_fake', default_value='false', description='Enable fake image sequence mode')
 
     camera_setup = ExecuteProcess(cmd=['bash', script_path], output='screen')
@@ -91,22 +81,15 @@ def generate_launch_description():
                 name='lane_candidate_mask_node',
                 output='screen',
                 parameters=[
-                    {'publish_debug': LaunchConfiguration('publish_debug')},
                     {'strict_white_v_min': 95}, {'loose_white_v_min': 95}, {'white_s_max': 30},
-                    
                     {'sobel_thresh': 220}, {'sobel_dilate_size': 11},
-                    
                     {'black_v_min': 0}, {'black_v_max': 135},
                     {'yellow_h_min': 20}, {'yellow_h_max': 35}, {'yellow_s_min': 75}, {'yellow_s_max': 180}, {'yellow_v_min': 145}, {'yellow_v_max': 255},
                     {'tophat_size': 27}, {'blast_size': 30}, {'noise_eraser_size': 5},
-                    
-                    {'yellow_fat_x': 8}, {'yellow_fat_y': 20}, 
-                    
-                    # ⭐ [NEW] 노란색 벽을 위로 끝까지 올릴지 결정하는 스위치!
+                    {'yellow_fat_x': 8}, {'yellow_fat_y': 20},
                     {'extend_yellow_top': True},
-                    
                     {'black_fat_radius': 10}, {'seed_row_from_bottom': 25}
-                ] + global_bev_params
+                ]
             ),
             Node(
                 package='perception',
@@ -114,7 +97,6 @@ def generate_launch_description():
                 name='centerline_extractor_node',
                 output='screen',
                 parameters=[
-                    {'publish_debug': LaunchConfiguration('publish_debug')},
                     {'frame_id': 'base_link'}, {'y_thresh': 0.25}, {'x_thresh': 0.60}, {'min_lane_pts': 15}
                 ] + global_res_params + global_metric_params
             ),
@@ -123,10 +105,10 @@ def generate_launch_description():
                 executable='perception_viz_node',
                 name='perception_viz_node',
                 output='screen',
-                parameters=global_viz_metric_params,
+                parameters=[],
                 condition=IfCondition(LaunchConfiguration('use_viz'))
             ),
         ]
     )
 
-    return LaunchDescription([use_viz_arg, debug_arg, use_fake_arg, camera_setup, nodes_to_start])
+    return LaunchDescription([use_viz_arg, use_fake_arg, camera_setup, nodes_to_start])

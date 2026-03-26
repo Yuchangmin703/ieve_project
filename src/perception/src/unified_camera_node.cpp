@@ -28,7 +28,6 @@ public:
 
     loadParamsAndBuildMap(config_path);
 
-    pub_raw_ = image_transport::create_publisher(this, "/perception/camera/raw");
     pub_bev_ = image_transport::create_publisher(this, "/perception/bev/image");
 
     if (use_fake) {
@@ -110,7 +109,10 @@ private:
       cv::Mat M = cv::getPerspectiveTransform(src_pts, dst_pts);
       cv::warpPerspective(map_x, combined_map_x_, M, cv::Size(out_w_, out_h_), cv::INTER_LINEAR);
       cv::warpPerspective(map_y, combined_map_y_, M, cv::Size(out_w_, out_h_), cv::INTER_LINEAR);
-      cv::warpPerspective(valid_undistort_mask, bev_valid_mask_, M, cv::Size(out_w_, out_h_), cv::INTER_NEAREST);
+      cv::Mat bev_valid_raw;
+      cv::warpPerspective(valid_undistort_mask, bev_valid_raw, M, cv::Size(out_w_, out_h_), cv::INTER_NEAREST);
+      // 반전 마스크 사전 저장 (매 프레임 `== 0` 비교 Mat 생성 제거)
+      cv::compare(bev_valid_raw, 0, bev_invalid_mask_, cv::CMP_EQ);
   }
 
   // ⭐ [NEW] 파이썬 노드에서 날아온 가짜 이미지를 받아서 처리하는 함수! (기존 tick()과 완전히 동일한 로직)
@@ -121,11 +123,9 @@ private:
       std_msgs::msg::Header header = msg->header;
       header.frame_id = frame_id_;
 
-      pub_raw_.publish(*cv_bridge::CvImage(header, "bgr8", frame).toImageMsg());
-
       cv::Mat bev_image;
       cv::remap(frame, bev_image, combined_map_x_, combined_map_y_, cv::INTER_LINEAR);
-      bev_image.setTo(cv::Scalar(0, 0, 0), bev_valid_mask_ == 0);
+      bev_image.setTo(cv::Scalar(0, 0, 0), bev_invalid_mask_);
 
       pub_bev_.publish(*cv_bridge::CvImage(header, "bgr8", bev_image).toImageMsg());
   }
@@ -138,18 +138,16 @@ private:
       header.stamp = now();
       header.frame_id = frame_id_;
 
-      pub_raw_.publish(*cv_bridge::CvImage(header, "bgr8", frame).toImageMsg());
-
       cv::Mat bev_image;
       cv::remap(frame, bev_image, combined_map_x_, combined_map_y_, cv::INTER_LINEAR);
-      bev_image.setTo(cv::Scalar(0, 0, 0), bev_valid_mask_ == 0);
+      bev_image.setTo(cv::Scalar(0, 0, 0), bev_invalid_mask_);
 
       pub_bev_.publish(*cv_bridge::CvImage(header, "bgr8", bev_image).toImageMsg());
   }
 
   cv::VideoCapture cap_;
-  cv::Mat combined_map_x_, combined_map_y_, bev_valid_mask_;
-  image_transport::Publisher pub_bev_, pub_raw_;
+  cv::Mat combined_map_x_, combined_map_y_, bev_invalid_mask_;
+  image_transport::Publisher pub_bev_;
   image_transport::Subscriber sub_fake_; // ⭐ 구독자 추가
   rclcpp::TimerBase::SharedPtr timer_;
   std::string frame_id_;
