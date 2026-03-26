@@ -23,12 +23,11 @@ class SerialBridgeNode(Node):
         # 제어 명령 및 필터 변수
         self.latest_speed = 0.0
         self.latest_steer = 0.0
-        self.has_new_cmd = False 
-        self.filtered_speed = 0.0 # 엔코더 노이즈 필터링용 변수
+        self.has_new_cmd = False
 
     def drive_callback(self, msg):
         self.last_drive_msg_time = self.get_clock().now()
-        self.latest_speed = max(-0.4, min(0.4, msg.drive.speed))
+        self.latest_speed = max(-1.5, min(1.5, msg.drive.speed))
         self.latest_steer = msg.drive.steering_angle
         self.has_new_cmd = True 
 
@@ -67,11 +66,8 @@ class SerialBridgeNode(Node):
                             try:
                                 speed_val = float(latest_line)
                                 if -10.0 < speed_val < 10.0:
-                                    # 🌟 EMA 필터: 새 데이터 20%, 기존 데이터 80% 반영
-                                    self.filtered_speed = (0.2 * speed_val) + (0.8 * self.filtered_speed)
-                                    
                                     speed_msg = Float32()
-                                    speed_msg.data = self.filtered_speed
+                                    speed_msg.data = speed_val
                                     self.speed_pub.publish(speed_msg)
                             except ValueError:
                                 pass
@@ -81,7 +77,7 @@ class SerialBridgeNode(Node):
         # 워치독 (0.5초 이상 명령 없으면 정지)
         now = self.get_clock().now()
         time_diff = (now - self.last_drive_msg_time).nanoseconds / 1e9
-        if time_diff > 0.5:
+        if time_diff > 0.25:
             if self.ser is not None and self.ser.is_open:
                 try:
                     self.ser.write(b"0.00,0.00\n")
